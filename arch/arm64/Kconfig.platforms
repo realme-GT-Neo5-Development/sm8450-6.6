@@ -318,6 +318,14 @@ config ARCH_X1E80100
           X1E80100 chipset. If you do not wish to build a kernel that
           runs on this chipset or if you are unsure, say 'N' here.
 
+config ARCH_CAPE
+        bool "Enable Support for Qualcomm Technologies, Inc. CAPE"
+        depends on ARCH_QCOM
+        help
+          This enables support for the Qualcomm Technologies, Inc.'s
+          CAPE chipset. If you do not wish to build a kernel that
+          runs on this chipset or if you are unsure, say 'N' here.
+
 config ARCH_PARROT
 	bool "Enable Support for Qualcomm Technologies, Inc. PARROT"
 	depends on ARCH_QCOM
