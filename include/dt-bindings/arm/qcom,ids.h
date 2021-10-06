@@ -249,6 +249,8 @@
 #define QCOM_ID_IPQ9510			521
 #define QCOM_ID_QRB4210			523
 #define QCOM_ID_QRB2210			524
+#define QCOM_ID_CAPE			530
+#define QCOM_ID_CAPE_V2			540
 #define QCOM_ID_SA8775P			534
 #define QCOM_ID_PARROT			537
 #define QCOM_ID_QRU1000			539
