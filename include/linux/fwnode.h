@@ -55,6 +55,8 @@ struct fwnode_handle {
  * CYCLE:	The fwnode link is part of a cycle. Don't defer probe.
  */
 #define FWLINK_FLAG_CYCLE			BIT(0)
+/* IGNORE: Completely ignore this link, even during cycle detection. */
+#define FWLINK_FLAG_IGNORE			BIT(1)
 
 struct fwnode_link {
 	struct fwnode_handle *supplier;
@@ -213,7 +215,8 @@ static inline void fwnode_dev_initialized(struct fwnode_handle *fwnode,
 }
 
 extern bool fw_devlink_is_strict(void);
-int fwnode_link_add(struct fwnode_handle *con, struct fwnode_handle *sup);
+int fwnode_link_add(struct fwnode_handle *con, struct fwnode_handle *sup,
+		    u8 flags);
 void fwnode_links_purge(struct fwnode_handle *fwnode);
 void fw_devlink_purge_absent_suppliers(struct fwnode_handle *fwnode);
 
