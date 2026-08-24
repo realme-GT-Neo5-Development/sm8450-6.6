@@ -74,7 +74,6 @@ config PINCTRL_MONACO
 config PINCTRL_WAIPIO
 	tristate "Qualcomm Technologies Inc WAIPIO pin controller driver"
 	depends on GPIOLIB && OF
-	select PINCTRL_MSM
 	help
 	  This is the pinctrl, pinmux, pinconf and gpiolib driver for the
 	  Qualcomm Technologies Inc Top Level Mode Multiplexer block (TLMM)
@@ -85,7 +84,6 @@ config PINCTRL_WAIPIO
 config PINCTRL_CAPE
         tristate "Qualcomm Technologies Inc CAPE pin controller driver"
         depends on GPIOLIB && OF
-        select PINCTRL_MSM
         help
           This is the pinctrl, pinmux, pinconf and gpiolib driver for the
           Qualcomm Technologies Inc Top Level Mode Multiplexer block (TLMM)
