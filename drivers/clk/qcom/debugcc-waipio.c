@@ -932,7 +932,7 @@ static int clk_debug_waipio_probe(struct platform_device *pdev)
 	for (i = 0; i < ARRAY_SIZE(debugcc_waipio_hws); i++) {
 		clk = devm_clk_register(&pdev->dev, debugcc_waipio_hws[i]);
 		if (IS_ERR(clk)) {
-			dev_err(&pdev->dev, "Unable to register %s, err:(%d)\n",
+			dev_err(&pdev->dev, "Unable to register %s, err:(%ld)\n",
 				clk_hw_get_name(debugcc_waipio_hws[i]),
 				PTR_ERR(clk));
 			return PTR_ERR(clk);
