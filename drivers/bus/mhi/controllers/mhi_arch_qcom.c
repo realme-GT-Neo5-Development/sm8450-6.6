@@ -369,8 +369,12 @@ static int mhi_bl_probe(struct mhi_device *mhi_device,
 	arch_info->boot_ipc_log =
 		ipc_log_context_create(MHI_BOOT_LOG_PAGES,
 				       dev_name(&mhi_device->dev), 0);
-	ipc_log_string(arch_info->boot_ipc_log, HLOG
-		       "Entered SBL, Session ID:0x%x\n", mhi_cntrl->session_id);
+	/*
+	 * mhi_controller.session_id is gone in 6.6: the ID is now a local in
+	 * mhi/host/boot.c (written to BHI_IMGTXDB) and is not stored anywhere,
+	 * so only the SBL entry itself is logged.
+	 */
+	ipc_log_string(arch_info->boot_ipc_log, HLOG "Entered SBL\n");
 
 	ret = mhi_prepare_for_transfer(mhi_device);
 	if (ret)
