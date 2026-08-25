@@ -663,6 +663,40 @@ void *dwc_trace_ipc_log_ctxt;
 static struct dload_struct __iomem *diag_dload;
 
 static void dwc3_pwr_event_handler(struct dwc3_msm *mdwc);
+#ifdef OPLUS_FEATURE_CHG_BASIC
+/*
+ * OPlus hook: the charger driver (oplus_chg/oplus_chg_v2) registers a
+ * callback here that, during VOOC/SVOOC fast charging, makes the driver
+ * ignore USB role notifications and keep the PHY in high-Z. Both charger
+ * modules link against this symbol. Forward-ported from msm-5.10.
+ */
+static bool (*oplus_ignore_usb_notify)(void);
+void oplus_dwc3_config_usbphy_pfunc(bool (*pfunc)(void))
+{
+	oplus_ignore_usb_notify = pfunc;
+}
+EXPORT_SYMBOL(oplus_dwc3_config_usbphy_pfunc);
+
+void oplus_usb_set_none_role(void)
+{
+	printk(KERN_ERR "%s\n", __func__);
+}
+EXPORT_SYMBOL(oplus_usb_set_none_role);
+
+static bool oplus_dwc3_need_set_usbphy_hz(void)
+{
+	bool ret = false;
+
+	if (oplus_ignore_usb_notify == NULL) {
+		ret = false;
+	} else {
+		ret = oplus_ignore_usb_notify();
+	}
+
+	printk(KERN_ERR "%s, set usbphy hz:%d\n", __func__, ret);
+	return ret;
+}
+#endif
 
 static inline void dwc3_msm_ep_writel(void __iomem *base, u32 offset, u32 value)
 {
@@ -5047,6 +5081,15 @@ static int dwc3_msm_set_role(struct dwc3_msm *mdwc, enum usb_role role)
 		return -EINVAL;
 
 	mutex_lock(&mdwc->role_switch_mutex);
+
+#ifdef OPLUS_FEATURE_CHG_BASIC
+	if (oplus_dwc3_need_set_usbphy_hz() == true && role != USB_ROLE_NONE) {
+		pr_err("!!!ignore the notify to start USB device mode");
+		mutex_unlock(&mdwc->role_switch_mutex);
+		return 0;
+	}
+#endif
+
 	cur_role = dwc3_msm_get_role(mdwc);
 
 	dbg_log_string("cur_role:%s new_role:%s refcnt:%d\n", dwc3_msm_usb_role_string(cur_role),
@@ -7518,7 +7561,14 @@ static struct platform_driver dwc3_msm_driver = {
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("DesignWare USB3 MSM Glue Layer");
-MODULE_SOFTDEP("pre: phy-generic phy-msm-snps-hs phy-msm-ssusb-qmp eud");
+/*
+ * FORWARDPORT: restore phy-msm-snps-eusb2 and "post: ucsi_glink" from
+ * msm-5.10. Both are used on this platform (the eUSB2 PHY hosts the
+ * repeater used by dwc3_msm; ucsi_glink handles USB-C via pmic_glink).
+ * Modules are loaded in parallel, so without the softdep dwc3_msm could
+ * probe before the PHY and USB would intermittently fail to come up.
+ */
+MODULE_SOFTDEP("pre: phy-generic phy-msm-snps-hs phy-msm-snps-eusb2 phy-msm-ssusb-qmp eud post: ucsi_glink");
 
 static int dwc3_msm_init(void)
 {
