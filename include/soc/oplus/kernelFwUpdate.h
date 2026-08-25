@@ -1,0 +1,1 @@
+../../../../modules/oplus/kernel/touchpanel/kernelFwUpdate/kernelFwUpdate.h

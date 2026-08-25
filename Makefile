@@ -554,6 +554,16 @@ RUSTFLAGS_KERNEL =
 AFLAGS_KERNEL	=
 LDFLAGS_vmlinux =
 
+# ifdef OPLUS_FEATURE_CAMERA_COMMON
+# Global definition, as in the OPlus msm-5.10 tree. In-kernel users are
+# leds-qti-flash (flash current cap set by the camera driver via
+# set_flash_max_current_mA()).
+KBUILD_CFLAGS +=   -DOPLUS_FEATURE_CAMERA_COMMON
+KBUILD_CPPFLAGS += -DOPLUS_FEATURE_CAMERA_COMMON
+CFLAGS_KERNEL +=   -DOPLUS_FEATURE_CAMERA_COMMON
+CFLAGS_MODULE +=   -DOPLUS_FEATURE_CAMERA_COMMON
+# endif
+
 # Use USERINCLUDE when you must reference the UAPI directories only.
 USERINCLUDE    := \
 		-I$(srctree)/arch/$(SRCARCH)/include/uapi \
@@ -1062,6 +1072,18 @@ include $(addprefix $(srctree)/, $(include-y))
 # scripts/Makefile.gcc-plugins is intentionally included last.
 # Do not add $(call cc-option,...) below this line. When you build the kernel
 # from the clean source tree, the GCC plugins do not exist at this point.
+
+# OPLUS_FEATURE_DISPLAY: enables the OPlus extensions in
+# include/linux/soc/qcom/panel_event_notifier.h (extra event types and the
+# "u32 data" field in struct panel_event_notification_data).
+#
+# Must be global: the field changes the size of a struct shared between
+# display-drivers and OPlus modules (touchpanel, uff), so every compilation
+# unit must see the same definition or the layouts silently diverge.
+KBUILD_CFLAGS   += -DOPLUS_FEATURE_DISPLAY
+KBUILD_CPPFLAGS += -DOPLUS_FEATURE_DISPLAY
+CFLAGS_KERNEL   += -DOPLUS_FEATURE_DISPLAY
+CFLAGS_MODULE   += -DOPLUS_FEATURE_DISPLAY
 
 # Add user supplied CPPFLAGS, AFLAGS, CFLAGS and RUSTFLAGS as the last assignments
 KBUILD_CPPFLAGS += $(KCPPFLAGS)
