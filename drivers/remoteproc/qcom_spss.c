@@ -30,6 +30,9 @@
 #define PBL_DONE	1
 #define SPSS_WDOG_ERR	0x44554d50
 #define SPSS_TIMEOUT	5000
+#define SPSS_POLL_RETRIES_NUM	20
+#define SPSS_POLL_TIMEOUT_MS	500
+#define SPSS_WAIT_TIMEOUT	(SPSS_POLL_TIMEOUT_MS * SPSS_POLL_RETRIES_NUM)
 #define QMP_MSG_LEN	64
 
 /* err_status definitions                       */
@@ -37,6 +40,11 @@
 #define PBL_LOG_MASK                  (0xff000000)
 
 #define to_glink_subdev(d) container_of(d, struct qcom_rproc_glink_spss, subdev)
+
+/*
+ * FORWARDPORT: "SPSS load failure" bit in the RMB error status registers.
+ */
+#define SP_SCSR_SPSS_LOAD_FAILURE_MASK		BIT(0)
 
 #define SP_SCSR_MB0_SP2CL_GP0_ADDR 0x1886020
 #define SP_SCSR_MB1_SP2CL_GP0_ADDR 0x1888020
@@ -118,6 +126,81 @@ struct qcom_spss {
 };
 
 static void read_sp2cl_debug_registers(struct qcom_spss *spss);
+
+/* Forward declarations */
+static bool spss_check_irq(struct qcom_spss *spss);
+
+/*
+ * FORWARDPORT: CONFIG_QCOM_SPSS_AC_RESTRICTION from msm-5.10.
+ *
+ * With SPSS mitigation enabled only SPU and TME_FW may write to access
+ * control resource-group-1 (SP_CNOC_SP_SCSR_XPU4), so this driver must not
+ * touch SP_CNOC_SP_SCSR_RMB_SP2SOC_IRQ_CLR/_IRQ_MASK: TME_FW masks the
+ * interrupts before SPSS starts and SPU clears/unmasks them as needed.
+ * An HLOS write is an access violation and TZ resets the device via PS_HOLD.
+ */
+#if IS_ENABLED(CONFIG_QCOM_SPSS_AC_RESTRICTION)
+#define SPSS_CLEAR_IRQ(_bit, _spss) /* Empty */
+
+static void mask_scsr_irqs(struct qcom_spss *spss)
+{
+	(void)(spss);
+}
+
+static int spss_wait_for_start_done(struct qcom_spss *spss)
+{
+	int i, ret;
+
+	/* Check IRQ status explicitly before starting to wait */
+	if (spss_check_irq(spss))
+		return 1;
+
+	for (i = 0, ret = 0; i < SPSS_POLL_RETRIES_NUM && ret == 0; i++) {
+		ret = wait_for_completion_timeout(&spss->start_done,
+				msecs_to_jiffies(SPSS_POLL_TIMEOUT_MS));
+		if (ret != 0) {
+			/* Completed */
+			break;
+		}
+
+		/* Timed-out - check IRQ status explicitly */
+		ret = spss_check_irq(spss);
+	}
+
+	return ret;
+}
+#else
+#define SPSS_CLEAR_IRQ(_bit, _spss) \
+	__raw_writel((_bit), (_spss)->irq_clr)
+
+static void mask_scsr_irqs(struct qcom_spss *spss)
+{
+	uint32_t mask_val;
+
+	/* Masking all interrupts */
+	mask_val = ~0;
+	__raw_writel(mask_val,  spss->irq_mask);
+}
+
+static void unmask_scsr_irqs(struct qcom_spss *spss)
+{
+	uint32_t mask_val;
+
+	/* unmasking interrupts handled by HLOS */
+	mask_val = ~0;
+	__raw_writel(mask_val & ~BIT(spss->bits_arr[ERR_READY]) &
+		     ~BIT(spss->bits_arr[PBL_DONE]), spss->irq_mask);
+}
+
+static int spss_wait_for_start_done(struct qcom_spss *spss)
+{
+	unmask_scsr_irqs(spss);
+
+	return wait_for_completion_timeout(&spss->start_done,
+			msecs_to_jiffies(SPSS_WAIT_TIMEOUT));
+}
+#endif /* CONFIG_QCOM_SPSS_AC_RESTRICTION */
+
 
 int qcom_rproc_toggle_load_state(struct qmp *qmp, const char *name, bool enable)
 {
@@ -232,7 +315,7 @@ static void clear_pbl_done(struct qcom_spss *spss)
 		dev_info(spss->dev, "PBL_DONE - 1st phase loading [%s] completed ok\n",
 			 spss->rproc->name);
 
-	__raw_writel(BIT(spss->bits_arr[PBL_DONE]), spss->irq_clr);
+	SPSS_CLEAR_IRQ(BIT(spss->bits_arr[PBL_DONE]), spss);
 }
 
 static void clear_err_ready(struct qcom_spss *spss)
@@ -240,7 +323,7 @@ static void clear_err_ready(struct qcom_spss *spss)
 	dev_info(spss->dev, "SW_INIT_DONE - 2nd phase loading [%s] completed ok\n",
 		 spss->rproc->name);
 
-	__raw_writel(BIT(spss->bits_arr[ERR_READY]), spss->irq_clr);
+	SPSS_CLEAR_IRQ(BIT(spss->bits_arr[ERR_READY]), spss);
 	complete(&spss->start_done);
 }
 
@@ -260,7 +343,7 @@ static void clear_sw_init_done_error(struct qcom_spss *spss, int err)
 		rmb_err_spare0, rmb_err_spare1, rmb_err_spare2);
 
 	/* Clear the interrupt source */
-	__raw_writel(BIT(spss->bits_arr[ERR_READY]), spss->irq_clr);
+	SPSS_CLEAR_IRQ(BIT(spss->bits_arr[ERR_READY]), spss);
 }
 
 
@@ -278,22 +361,30 @@ static void clear_wdog(struct qcom_spss *spss)
 		panic("Panicking, remoterpoc %s crashed\n", spss->rproc->name);
 	}
 
-	__raw_writel(BIT(spss->bits_arr[ERR_READY]), spss->irq_clr);
+	SPSS_CLEAR_IRQ(BIT(spss->bits_arr[ERR_READY]), spss);
 	rproc_report_crash(spss->rproc, RPROC_WATCHDOG);
 }
 
-static irqreturn_t spss_generic_handler(int irq, void *dev_id)
+/*
+ * spss_check_irq() - check SP2SOC IRQ and errors explicitly, regardless of
+ * IRQ mask.
+ * Returns true if ERR_READY IRQ is set without errors, or false otherwise.
+ *
+ * @spss:  pointer to SPSS private data
+ */
+static bool spss_check_irq(struct qcom_spss *spss)
 {
-	struct qcom_spss *spss = dev_id;
+	bool ret = false;
 	uint32_t status_val, err_value;
 
 	err_value =  __raw_readl(spss->err_status_spare);
 	status_val = __raw_readl(spss->irq_status);
 
 	if (status_val & BIT(spss->bits_arr[ERR_READY])) {
-		if (!err_value)
+		if (!err_value) {
 			clear_err_ready(spss);
-		else if (err_value == SPSS_WDOG_ERR)
+			ret = true;
+		} else if (err_value == SPSS_WDOG_ERR)
 			clear_wdog(spss);
 		else
 			clear_sw_init_done_error(spss, err_value);
@@ -302,28 +393,17 @@ static irqreturn_t spss_generic_handler(int irq, void *dev_id)
 	if (status_val & BIT(spss->bits_arr[PBL_DONE]))
 		clear_pbl_done(spss);
 
+	return ret;
+}
+
+static irqreturn_t spss_generic_handler(int irq, void *dev_id)
+{
+	struct qcom_spss *spss = dev_id;
+
+	spss_check_irq(spss);
+
 	return IRQ_HANDLED;
 }
-
-static void mask_scsr_irqs(struct qcom_spss *spss)
-{
-	uint32_t mask_val;
-
-	/* Masking all interrupts */
-	mask_val = ~0;
-	__raw_writel(mask_val,  spss->irq_mask);
-}
-
-static void unmask_scsr_irqs(struct qcom_spss *spss)
-{
-	uint32_t mask_val;
-
-	/* unmasking interrupts handled by HLOS */
-	mask_val = ~0;
-	__raw_writel(mask_val & ~BIT(spss->bits_arr[ERR_READY]) &
-		     ~BIT(spss->bits_arr[PBL_DONE]), spss->irq_mask);
-}
-
 
 static bool check_status(struct qcom_spss *spss, int *ret_error)
 {
@@ -341,7 +421,7 @@ static bool check_status(struct qcom_spss *spss, int *ret_error)
 
 	if ((status_val & BIT(spss->bits_arr[ERR_READY])) && err_value == SPSS_WDOG_ERR) {
 		dev_err(spss->dev, "wdog bite is pending\n");
-		__raw_writel(BIT(spss->bits_arr[ERR_READY]), spss->irq_clr);
+		SPSS_CLEAR_IRQ(BIT(spss->bits_arr[ERR_READY]), spss);
 		return true;
 	}
 	return false;
@@ -537,6 +617,7 @@ static int spss_stop(struct rproc *rproc)
 	if (ret)
 		panic("Panicking, remoteproc %s failed to shutdown.\n", rproc->name);
 
+
 	mask_scsr_irqs(spss);
 	if (spss->qmp)
 		qcom_rproc_toggle_load_state(spss->qmp, spss->qmp_name, false);
@@ -579,9 +660,7 @@ static int spss_attach(struct rproc *rproc)
 
 	/* If booted successfully then wait for init_done*/
 
-	unmask_scsr_irqs(spss);
-
-	ret = wait_for_completion_timeout(&spss->start_done, msecs_to_jiffies(SPSS_TIMEOUT));
+	ret = spss_wait_for_start_done(spss);
 	read_sp2cl_debug_registers(spss);
 
 	/*
@@ -601,7 +680,7 @@ static int spss_attach(struct rproc *rproc)
 		dev_err(spss->dev, "Failed to disable sensors regulator [%d]\n", regulator_ret);
 
 	if (rproc->recovery_disabled && !ret) {
-		dev_err(spss->dev, "%d ms timeout poked\n", SPSS_TIMEOUT);
+		dev_err(spss->dev, "%d ms timeout poked\n", SPSS_WAIT_TIMEOUT);
 #ifdef CONFIG_ARCH_SUN
 		dev_info(spss->dev, "SP-PBL patch version is %d\n", sp_pbl_patch_version);
 		if (sp_pbl_patch_version == 0x0)
@@ -656,9 +735,7 @@ static int spss_start(struct rproc *rproc)
 	if (ret)
 		panic("Panicking, auth and reset failed for remoteproc %s\n", rproc->name);
 
-	unmask_scsr_irqs(spss);
-	dev_err(spss->dev, "trying to read spss registers\n");
-	ret = wait_for_completion_timeout(&spss->start_done, msecs_to_jiffies(SPSS_TIMEOUT));
+	ret = spss_wait_for_start_done(spss);
 	read_sp2cl_debug_registers(spss);
 #ifdef CONFIG_ARCH_SUN
 	if (!ret)
@@ -770,7 +847,7 @@ static int spss_alloc_memory_region(struct qcom_spss *spss)
 {
 	struct device_node *node;
 	struct resource r;
-	int ret;
+	int ret, extra_size = 0;
 
 	node = of_parse_phandle(spss->dev->of_node, "memory-region", 0);
 	if (!node) {
@@ -782,8 +859,17 @@ static int spss_alloc_memory_region(struct qcom_spss *spss)
 	if (ret)
 		return ret;
 
+	/*
+	 * FORWARDPORT: honour qcom,extra-size as msm-5.10 does. 6.6 maps only
+	 * resource_size(), leaving the region shorter than the SPSS firmware
+	 * expects.
+	 */
+	ret = of_property_read_u32(spss->dev->of_node, "qcom,extra-size", &extra_size);
+	if (ret)
+		extra_size = 0;
+
 	spss->mem_phys = spss->mem_reloc = r.start;
-	spss->mem_size = resource_size(&r);
+	spss->mem_size = resource_size(&r) + extra_size;
 	spss->mem_region = devm_ioremap_wc(spss->dev, spss->mem_phys, spss->mem_size);
 	if (!spss->mem_region) {
 		dev_err(spss->dev, "unable to map memory region: %pa+%zx\n",
@@ -899,18 +985,28 @@ static int qcom_spss_probe(struct platform_device *pdev)
 	if (ret)
 		goto free_rproc;
 
+
 	ret = qcom_spss_init_mmio(pdev, spss);
 	if (ret)
 		goto deinit_wakeup_source;
 
-	if (!(__raw_readl(spss->rmb_gpm) & BIT(0)))
+	/*
+	 * FORWARDPORT: restore the second check from msm-5.10. 6.6 only checks
+	 * rmb_gpm, so it reported RPROC_DETACHED ("already running, attach")
+	 * even when err_status_spare records an SPSS load failure. Attaching to a
+	 * dead SPSS resets the SoC via PS_HOLD without any kernel message.
+	 */
+	if (!(__raw_readl(spss->rmb_gpm) & SP_SCSR_SPSS_LOAD_FAILURE_MASK) &&
+	    !(__raw_readl(spss->err_status_spare - 4) & SP_SCSR_SPSS_LOAD_FAILURE_MASK))
 		rproc->state = RPROC_DETACHED;
 	else
 		rproc->state = RPROC_OFFLINE;
 
+
 	ret = spss_alloc_memory_region(spss);
 	if (ret)
 		goto deinit_wakeup_source;
+
 
 	ret = spss_init_clock(spss);
 	if (ret)
@@ -926,6 +1022,7 @@ static int qcom_spss_probe(struct platform_device *pdev)
 			goto deinit_wakeup_source;
 	}
 
+
 	spss->qmp = qmp_get(spss->dev);
 	if (IS_ERR(spss->qmp)) {
 		if (PTR_ERR(spss->qmp) != -ENODEV)
@@ -934,13 +1031,21 @@ static int qcom_spss_probe(struct platform_device *pdev)
 		spss->qmp = NULL;
 	}
 
+
 	qcom_add_glink_spss_subdev(rproc, &spss->glink_subdev, "spss");
-	qcom_add_ssr_subdev(rproc, &spss->ssr_subdev, desc->ssr_name);
+	/*
+	 * FORWARDPORT: register sysmon before SSR, as msm-5.10 does; 6.6 reversed
+	 * the order. With SSR registered first, the SSR notifier already exists
+	 * when the sysmon rpmsg driver matches the "sys_mon" channel, which hangs
+	 * the SoC (PS_HOLD reset).
+	 */
 	spss->sysmon_subdev = qcom_add_sysmon_subdev(rproc, desc->ssr_name, -EINVAL);
 	if (IS_ERR(spss->sysmon_subdev)) {
 		dev_err(spss->dev, "failed to add sysmon subdevice\n");
 		goto deinit_wakeup_source;
 	}
+
+	qcom_add_ssr_subdev(rproc, &spss->ssr_subdev, desc->ssr_name);
 
 	mask_scsr_irqs(spss);
 	spss->generic_irq = platform_get_irq(pdev, 0);
@@ -950,6 +1055,7 @@ static int qcom_spss_probe(struct platform_device *pdev)
 		dev_err(&pdev->dev, "failed to acquire generic IRQ\n");
 		goto remove_subdev;
 	}
+
 
 	ret = rproc_add(rproc);
 	if (ret)
@@ -991,6 +1097,7 @@ static const struct spss_data spss_resource_init = {
 
 static const struct of_device_id spss_of_match[] = {
 	{ .compatible = "qcom,waipio-spss-pas", .data = &spss_resource_init},
+	{ .compatible = "qcom,cape-spss-pas", .data = &spss_resource_init},
 	{ .compatible = "qcom,kalama-spss-pas", .data = &spss_resource_init},
 	{ .compatible = "qcom,pineapple-spss-pas", .data = &spss_resource_init},
 	{ .compatible = "qcom,sun-spss-pas", .data = &spss_resource_init},
