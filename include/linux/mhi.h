@@ -309,6 +309,13 @@ struct mhi_controller_config {
 	struct mhi_event_config *event_cfg;
 	bool use_bounce_buf;
 	bool m2_no_db;
+
+	/*
+	 * FORWARDPORT: static BHIe register offset supplied by cnss2. Unused:
+	 * the MHI core reads BHIEOFF from the device instead. Present only so
+	 * that the cnss2 designated initializer compiles.
+	 */
+	u32 bhie_offset;
 };
 
 /**
@@ -491,6 +498,17 @@ struct mhi_controller {
 	bool wake_set;
 	unsigned long irq_flags;
 	u32 mru;
+
+	/*
+	 * FORWARDPORT: Qualcomm MHI extensions assigned unconditionally by
+	 * cnss2 (cnss_mhi_misc_init()). This MHI core does not call them; it
+	 * only needs runtime_get/runtime_put, which cnss2 also sets.
+	 *
+	 * Appended at the end so existing field offsets do not move. MHI is not
+	 * part of the GKI KMI (CONFIG_MHI_BUS=m).
+	 */
+	int (*runtime_get_sync)(struct mhi_controller *mhi_cntrl);
+	int (*runtime_put_autosuspend)(struct mhi_controller *mhi_cntrl);
 };
 
 /**
@@ -808,6 +826,13 @@ int mhi_prepare_for_transfer_autoqueue(struct mhi_device *mhi_dev);
  *                               SUSPENDED state.
  * @mhi_dev: Device associated with the channels
  */
+/**
+ * mhi_poll - Poll for any available data in DL direction
+ * @mhi_dev: Device associated with the channels
+ * @budget: # of events to process
+ */
+int mhi_poll(struct mhi_device *mhi_dev, u32 budget);
+
 void mhi_unprepare_from_transfer(struct mhi_device *mhi_dev);
 
 /**
