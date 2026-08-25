@@ -23,3 +23,13 @@ config QTI_PMIC_EUSB2_REPEATER
 
 	  To compile this driver as a module, choose M here.
 endmenu
+
+config I2C_EUSB2_REPEATER
+	tristate "eUSB2 i2c repeater driver"
+	depends on USB_REPEATER && I2C
+	help
+	  Enable support for the external eUSB2 repeater attached over I2C
+	  (NXP PTN3222 / TI TUSB), which converts eUSB2 signalling from the
+	  SoC PHY to legacy USB 2.0 levels on the connector. Required on
+	  boards that route USB HS through a discrete repeater instead of
+	  the PMIC one.
