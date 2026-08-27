@@ -8,6 +8,7 @@
 
 #include <linux/atomic.h>
 #include <linux/cpu_pm.h>
+#include <linux/clk.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
@@ -1736,6 +1737,8 @@ static int rpmh_rsc_probe(struct platform_device *pdev)
 	u32 rsc_id, major_ver, minor_ver, solver_config;
 	int i, j, drv_count;
 	const char *name;
+	struct clk_bulk_data *rsc_clks;
+	int num_rsc_clks;
 
 	/*
 	 * Even though RPMh doesn't directly use cmd-db, all of its children
@@ -1747,6 +1750,35 @@ static int rpmh_rsc_probe(struct platform_device *pdev)
 			dev_err(&pdev->dev, "Command DB not available (%d)\n",
 									ret);
 		return ret;
+	}
+
+	/*
+	 * FORWARDPORT: handle the "clocks" property, which neither the msm-5.10 nor
+	 * the 6.6 driver did. disp_rsc declares DISP_CC_MDSS_RSCC_AHB_CLK in DT;
+	 * it only worked before because the bootloader leaves DISP_CC clocks on for
+	 * continuous splash.
+	 *
+	 * With the clock gated DRV_PRNT_CHLD_CONFIG reads as 0, so max_tcs is 0 and
+	 * rpmh_probe_tcs_config() fails with -EINVAL without a message. disp_rsc
+	 * then never creates disp_bcm_voter, and the ICC providers that need it
+	 * (and everything behind them, including UFS) defer forever.
+	 *
+	 * Getting the clocks defers probe until dispcc is ready, and enabling them
+	 * guarantees register access. Nodes without "clocks" (apps_rsc) are
+	 * unaffected.
+	 */
+	ret = devm_clk_bulk_get_all(&pdev->dev, &rsc_clks);
+	if (ret < 0)
+		return dev_err_probe(&pdev->dev, ret,
+				     "failed to get RSC clocks\n");
+	num_rsc_clks = ret;
+
+	if (num_rsc_clks) {
+		ret = clk_bulk_prepare_enable(num_rsc_clks, rsc_clks);
+		if (ret)
+			return dev_err_probe(&pdev->dev, ret,
+					     "failed to enable %d RSC clocks\n",
+					     num_rsc_clks);
 	}
 
 	rpmh_standalone = cmd_db_is_standalone();
@@ -1905,7 +1937,17 @@ static int rpmh_rsc_probe(struct platform_device *pdev)
 	list_add_tail(&rsc_top->list, &rpmh_rsc_dev_list);
 	dev_set_drvdata(&pdev->dev, rsc_top);
 
-	return devm_of_platform_populate(&pdev->dev);
+	ret = devm_of_platform_populate(&pdev->dev);
+
+	/*
+	 * The clocks are only needed during probe; at runtime consumers such as
+	 * sde_rsc enable them as needed. Keeping disp_cc_mdss_rscc_ahb_clk on
+	 * would prevent CX collapse and block system deep sleep.
+	 */
+	if (num_rsc_clks)
+		clk_bulk_disable_unprepare(num_rsc_clks, rsc_clks);
+
+	return ret;
 }
 
 static const struct dev_pm_ops rpmh_rsc_dev_pm_ops = {
