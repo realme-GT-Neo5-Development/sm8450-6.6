@@ -503,12 +503,23 @@ static int gdsc_disable(struct regulator_dev *rdev)
 		}
 	}
 
+	/*
+	 * FORWARDPORT: msm-5.10 does not reject the disable here; it sets
+	 * SW_COLLAPSE_MASK and leaves HW_CONTROL set, letting the hardware decide.
+	 *
+	 * Returning -EBUSY breaks deep sleep: sde_rsc_mode2_entry_v3() switches the
+	 * display GDSC to HW control and then calls regulator_disable() without
+	 * checking the result. The disable was never retried, so the MDSS GDSC kept
+	 * use_count 1 and, via its parent supply, held MMCX and in turn CX.
+	 *
+	 * The warning is kept for diagnostics. The hardware can collapse the GDSC
+	 * with HW_CONTROL set, so the disable proceeds. This also avoids skipping
+	 * the "done:" label, which releases the parent_rdev mutex taken above.
+	 */
 	regmap_read(sc->regmap, REG_OFFSET, &regval);
-	if (regval & HW_CONTROL_MASK) {
-		dev_warn(&rdev->dev, "Invalid Disable while %s is under HW control\n",
+	if (regval & HW_CONTROL_MASK)
+		dev_warn(&rdev->dev, "Disable while %s is under HW control\n",
 				sc->rdesc.name);
-		return -EBUSY;
-	}
 
 	if (sc->clk_ctrl_count)
 		gdsc_clk_ctrl(sc, false);
@@ -1244,12 +1255,22 @@ static int gdsc_probe(struct platform_device *pdev)
 		goto err;
 	}
 
+	/*
+	 * FORWARDPORT: restore the msm-5.10 behaviour of only warning here.
+	 * 6.6 turned a proxy consumer registration failure into a fatal error.
+	 *
+	 * On this platform every GDSC's proxy-supply points at itself, so the
+	 * registration returns -EPROBE_DEFER (as it also does on 5.10). Failing
+	 * probe on that took down every GDSC, including gcc_ufs_phy_gdsc, and
+	 * surfaced only as repeated "Failed to register GCC clocks: -517".
+	 *
+	 * The proxy consumer only keeps the rail on until userspace takes over;
+	 * real consumers (e.g. UFS) enable the rail themselves when needed.
+	 */
 	ret = devm_regulator_proxy_consumer_register(dev, dev->of_node);
-	if (ret) {
+	if (ret)
 		dev_err(dev, "failed to register proxy consumer, ret=%d\n",
 			ret);
-		goto err;
-	}
 
 	ret = devm_regulator_debug_register(dev, sc->rdev);
 	if (ret)
