@@ -1544,6 +1544,7 @@
   reboot_mode
   rebuild_sched_domains
   reclaim_shmem_address_space
+  refcount_dec_and_lock
   refcount_dec_not_one
   refcount_warn_saturate
   regcache_mark_dirty
