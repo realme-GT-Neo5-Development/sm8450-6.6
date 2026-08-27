@@ -4089,7 +4089,11 @@ static int gcc_waipio_probe(struct platform_device *pdev)
 
 	ret = qcom_cc_really_probe(pdev, &gcc_waipio_desc, regmap);
 	if (ret) {
-		dev_err(&pdev->dev, "Failed to register GCC clocks\n");
+		/*
+		 * Include the error code: -EPROBE_DEFER (waiting on vdd_cx, vdd_mxa or
+		 * rpmhclk) and a hard failure need very different fixes.
+		 */
+		dev_err(&pdev->dev, "Failed to register GCC clocks: %d\n", ret);
 		return ret;
 	}
 
