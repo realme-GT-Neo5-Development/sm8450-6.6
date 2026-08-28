@@ -1394,6 +1394,16 @@ static int ufs_qcom_set_dme_vs_core_clk_ctrl_max_freq_mode(struct ufs_hba *hba)
 	}
 
 	switch (max_freq) {
+	/*
+	 * FORWARDPORT: the 850 MHz case was lost in 6.6. waipio/cape use an 850 MHz
+	 * max for core_clk_unipro, which the 6.6 table (written for other chip
+	 * generations) does not handle, failing probe with -EINVAL. The 213/9
+	 * values are taken from msm-5.10. The scale_up argument is new in 6.6 and
+	 * all other cases pass true for the max-frequency path.
+	 */
+	case 850000000:
+		err = ufs_qcom_set_dme_vs_core_clk_ctrl_clear_div(hba, 213, 9, true);
+		break;
 	case 403000000:
 		err = ufs_qcom_set_dme_vs_core_clk_ctrl_clear_div(hba, 403, 16, true);
 		break;
