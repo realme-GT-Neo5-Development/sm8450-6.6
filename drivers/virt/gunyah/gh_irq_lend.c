@@ -487,6 +487,14 @@ int gh_irq_release_notify(enum gh_irq_label label)
 }
 EXPORT_SYMBOL_GPL(gh_irq_release_notify);
 
+/*
+ * Error paths must unregister whatever was already registered. If module
+ * init fails, the module memory is freed while gh_irq_lent_nb is still on
+ * the gh_rm_notifier chain, and the next load attempt walks freed memory
+ * in notifier_chain_register() (use-after-free).
+ */
+static bool vm_nb_registered;
+
 static int __init gh_irq_lend_init(void)
 {
 	int ret;
@@ -495,11 +503,30 @@ static int __init gh_irq_lend_init(void)
 	if (ret)
 		return ret;
 
+	/* VM state notifications are only provided by the secure VM loader.
+	 * With CONFIG_GH_SECURE_VM_LOADER=n the gh_vm.h stub returns -EINVAL;
+	 * treat that as optional rather than failing the module (msm_drm
+	 * depends on its exports). IRQ lending works without it.
+	 */
 	ret = gh_register_vm_notifier(&gh_irq_vm_nb);
-	if (ret)
-		return ret;
+	if (ret) {
+		pr_info("VM notifications unavailable (%d), skipping\n", ret);
+		vm_nb_registered = false;
+	} else {
+		vm_nb_registered = true;
+	}
 
-	return gh_rm_register_notifier(&gh_irq_released_accepted_nb);
+	ret = gh_rm_register_notifier(&gh_irq_released_accepted_nb);
+	if (ret)
+		goto err_released_notifier;
+
+	return 0;
+
+err_released_notifier:
+	if (vm_nb_registered)
+		gh_unregister_vm_notifier(&gh_irq_vm_nb);
+	gh_rm_unregister_notifier(&gh_irq_lent_nb);
+	return ret;
 }
 module_init(gh_irq_lend_init);
 
@@ -507,7 +534,8 @@ static void gh_irq_lend_exit(void)
 {
 	gh_rm_unregister_notifier(&gh_irq_lent_nb);
 	gh_rm_unregister_notifier(&gh_irq_released_accepted_nb);
-	gh_unregister_vm_notifier(&gh_irq_vm_nb);
+	if (vm_nb_registered)
+		gh_unregister_vm_notifier(&gh_irq_vm_nb);
 }
 module_exit(gh_irq_lend_exit);
 
