@@ -19,6 +19,7 @@
 
 #include <soc/qcom/ice.h>
 #include <linux/qtee_shmbridge.h>
+#include <linux/tme_hwkm_master_defs.h>
 
 #define AES_256_XTS_KEY_SIZE			64
 
@@ -41,6 +42,15 @@
 #define QTI_HWKM_ICE_RG_IPCAT_VERSION			0x0000
 #define QCOM_ICE_REG_HWKM_TZ_KM_CTL			0x1000
 #define QCOM_ICE_REG_HWKM_TZ_KM_STATUS			0x1004
+/*
+ * Transport key (TPKEY) receive registers, as used by the msm-5.10 HWKM
+ * driver (hwkmregs.h / hwkm.c). The key is present when
+ * (RECEIVE_STATUS >> 8) == 0x1.
+ */
+#define QCOM_ICE_REG_HWKM_TZ_TPKEY_RECEIVE_CTL		0x101C
+#define QCOM_ICE_REG_HWKM_TZ_TPKEY_RECEIVE_STATUS	0x1020
+#define QCOM_ICE_HWKM_TPKEY_EN_BIT			8
+#define QCOM_ICE_HWKM_SLAVE_TPKEY_VAL			0x18C
 #define QCOM_ICE_REG_HWKM_BANK0_BANKN_IRQ_STATUS	0x2008
 #define QCOM_ICE_REG_HWKM_BANK0_BBAC_0			0x5000
 #define QCOM_ICE_REG_HWKM_BANK0_BBAC_1			0x5004
@@ -195,14 +205,56 @@ static int qcom_ice_wait_bist_status(struct qcom_ice *ice)
 		dev_err(ice->dev, "Timed out waiting for ICE self-test to complete\n");
 
 	if (ice->use_hwkm) {
+		u32 ipcat;
+		int hwkm_major;
+
+		/*
+		 * Forward-ported from msm-5.10: take the HWKM version from the HWKM
+		 * IPCAT register. qcom_ice_check_supported() infers it from the ICE
+		 * version, which reports v1 on cape although the block is v2 (TZ
+		 * generates 100-byte wrapped keys). With the wrong version the BIST
+		 * check below fails, HWKM is disabled and TZ rejects every key.
+		 *
+		 * This must not move to qcom_ice_check_supported(): the HWKM registers
+		 * are not accessible before ICE is enabled and the read hangs the bus.
+		 */
+		ipcat = qcom_ice_readl(ice,
+				HWKM_OFFSET(QTI_HWKM_ICE_RG_IPCAT_VERSION));
+		hwkm_major = FIELD_GET(GENMASK(31, 24), ipcat);
+		if (hwkm_major == 1 || hwkm_major == 2) {
+			if (hwkm_major != ice->hwkm_version)
+				dev_info(ice->dev,
+					"HWKM version: ICE regs say %d, HWKM regs say %d (ipcat=0x%08x) - using %d\n",
+					ice->hwkm_version, hwkm_major, ipcat,
+					hwkm_major);
+			ice->hwkm_version = hwkm_major;
+		} else {
+			dev_info(ice->dev,
+				"HWKM ipcat=0x%08x unusable, keeping version %d\n",
+				ipcat, ice->hwkm_version);
+		}
+
 		bist_done_val = (ice->hwkm_version == 1) ?
 				 QCOM_ICE_HWKM_BIST_DONE_V1_VAL :
 				 QCOM_ICE_HWKM_BIST_DONE_V2_VAL;
-		if (qcom_ice_readl(ice,
-				   HWKM_OFFSET(QCOM_ICE_REG_HWKM_TZ_KM_STATUS)) !=
-				   bist_done_val) {
-			dev_warn(ice->dev, "HWKM BIST error\n");
+
+		/*
+		 * Forward-ported from msm-5.10 (qti_hwkm_check_bist_status()): test
+		 * that the required BIST bits are set instead of comparing the whole
+		 * status register. cape sets additional bits, which made the equality
+		 * check fail and disabled HWKM.
+		 */
+		regval = qcom_ice_readl(ice,
+				HWKM_OFFSET(QCOM_ICE_REG_HWKM_TZ_KM_STATUS));
+		if ((regval & bist_done_val) != bist_done_val) {
+			dev_warn(ice->dev,
+				 "HWKM BIST error: status 0x%08x, required bits 0x%08x\n",
+				 regval, bist_done_val);
 			ice->use_hwkm = false;
+		} else if (regval != bist_done_val) {
+			dev_info(ice->dev,
+				 "HWKM BIST ok: status 0x%08x (extra bits beyond 0x%08x)\n",
+				 regval, bist_done_val);
 		}
 	}
 
@@ -238,6 +290,71 @@ static void qcom_ice_enable_standard_mode(struct qcom_ice *ice)
 	}
 }
 
+/*
+ * Forward-ported from msm-5.10 qti_hwkm_set_tpkey(): have TME broadcast
+ * the transport key to ICE. Without it TZ has no key to unwrap content
+ * keys with and qcom_scm_config_set_ice_key() fails with -EINVAL.
+ *
+ * Sequence: enter slave receive mode, broadcast the key from TME
+ * (retried while TME is not ready yet, as in 5.10), check the receive
+ * status, leave receive mode. Failure is not fatal here; it surfaces
+ * when the key is programmed.
+ */
+static void qcom_ice_ensure_tpkey(struct qcom_ice *ice)
+{
+	struct tme_ext_err_info errinfo = {0};
+	u32 val;
+	int retries;
+	int err;
+
+	/* Nothing to do if the key has already been delivered. */
+	val = qcom_ice_readl(ice,
+			     HWKM_OFFSET(QCOM_ICE_REG_HWKM_TZ_TPKEY_RECEIVE_STATUS));
+	if ((val >> 8) == 0x1)
+		return;
+
+	might_sleep();
+
+	/* Enter slave receive mode */
+	val = qcom_ice_readl(ice,
+			     HWKM_OFFSET(QCOM_ICE_REG_HWKM_TZ_TPKEY_RECEIVE_CTL));
+	val &= ~BIT(QCOM_ICE_HWKM_TPKEY_EN_BIT);
+	qcom_ice_writel(ice, val,
+			HWKM_OFFSET(QCOM_ICE_REG_HWKM_TZ_TPKEY_RECEIVE_CTL));
+	wmb();
+	qcom_ice_writel(ice, QCOM_ICE_HWKM_SLAVE_TPKEY_VAL,
+			HWKM_OFFSET(QCOM_ICE_REG_HWKM_TZ_TPKEY_RECEIVE_CTL));
+	wmb();
+
+	/* Broadcast the transport key from TME */
+	err = tme_hwkm_master_broadcast_transportkey(&errinfo);
+	for (retries = 0;
+	     (err == -ENODEV || err == -EAGAIN) && retries < 10;
+	     retries++) {
+		usleep_range(8000, 12000);
+		err = tme_hwkm_master_broadcast_transportkey(&errinfo);
+	}
+
+	/* Check delivery */
+	val = qcom_ice_readl(ice,
+			     HWKM_OFFSET(QCOM_ICE_REG_HWKM_TZ_TPKEY_RECEIVE_STATUS));
+	if (err || (val >> 8) != 0x1)
+		dev_err(ice->dev,
+			"TPKEY not delivered: err=%d status=0x%08x retries=%d tme=0x%x seq=0x%x\n",
+			err, val, retries, errinfo.tme_err_status,
+			errinfo.seq_err_status);
+	else
+		dev_dbg(ice->dev, "TPKEY delivered, status=0x%08x\n", val);
+
+	/* Leave slave receive mode */
+	val = qcom_ice_readl(ice,
+			     HWKM_OFFSET(QCOM_ICE_REG_HWKM_TZ_TPKEY_RECEIVE_CTL));
+	val &= ~BIT(QCOM_ICE_HWKM_TPKEY_EN_BIT);
+	qcom_ice_writel(ice, val,
+			HWKM_OFFSET(QCOM_ICE_REG_HWKM_TZ_TPKEY_RECEIVE_CTL));
+	wmb();
+}
+
 static void qcom_ice_hwkm_init(struct qcom_ice *ice)
 {
 	if (!ice->use_hwkm)
@@ -267,6 +384,11 @@ static void qcom_ice_hwkm_init(struct qcom_ice *ice)
 	qcom_ice_writel(ice, 0x8,
 			HWKM_OFFSET(QCOM_ICE_REG_HWKM_BANK0_BANKN_IRQ_STATUS));
 
+	/*
+	 * The transport key is intentionally not set here. This runs on every
+	 * UFS resume and the TME mailbox request sleeps; it is set lazily when
+	 * a key is programmed instead, like msm-5.10 does (qcom_ice_ensure_tpkey()).
+	 */
 	ice->hwkm_init_complete = true;
 }
 
@@ -323,17 +445,32 @@ EXPORT_SYMBOL_GPL(qcom_ice_suspend);
  * which are different for different versions, make the translation
  * here. For v1 however, the translation is done in trustzone.
  */
+/*
+ * Forward-ported from msm-5.10 (KEYMANAGER_ICE_MAP_SLOT): the TZ shipped
+ * with this device expects the kernel to translate the slot for HWKM v1
+ * too, using offset 10 when the HWKM minor version is 0. The 6.6 code
+ * left v1 slots to TZ and keyed the offset on the full v2.0 version,
+ * which made TZ reject every key.
+ */
+#define QCOM_ICE_HWKM_MINOR_VERSION_SHIFT	16
+#define QCOM_ICE_HWKM_MINOR_VERSION_MASK	0xff
+
 static int translate_hwkm_slot(struct qcom_ice *ice, int slot)
 {
 	int offset = 0;
-	u32 hwkm_version = 0;
+	u32 reg = 0;
+	u32 minor = 0;
 
 	if (ice->hwkm_init_complete) {
-		hwkm_version = qcom_ice_readl(ice, HWKM_OFFSET(QTI_HWKM_ICE_RG_IPCAT_VERSION));
-		if (hwkm_version >= QCOM_ICE_HWKM_V2_0_0 && hwkm_version < QCOM_ICE_HWKM_V2_1_0)
+		reg = qcom_ice_readl(ice,
+				HWKM_OFFSET(QTI_HWKM_ICE_RG_IPCAT_VERSION));
+		minor = (reg >> QCOM_ICE_HWKM_MINOR_VERSION_SHIFT) &
+			QCOM_ICE_HWKM_MINOR_VERSION_MASK;
+		if (minor < 1)
 			offset = 10;
 	}
-	return (ice->hwkm_version == 1) ? slot : ((slot * 2) + offset);
+
+	return (slot * 2) + offset;
 }
 
 #if IS_ENABLED(CONFIG_SCSI_UFS_CRYPTO_QTI) || IS_ENABLED(CONFIG_MMC_CRYPTO_QTI)
@@ -345,6 +482,13 @@ static int qcom_ice_program_wrapped_key(struct qcom_ice *ice,
 	int err;
 	union crypto_cfg cfg;
 	struct qtee_shm shm;
+
+	/*
+	 * The transport key must be in ICE before TZ wraps the content key.
+	 * This path runs in process context, so it may sleep.
+	 */
+	if (ice->use_hwkm)
+		qcom_ice_ensure_tpkey(ice);
 
 	hwkm_slot = translate_hwkm_slot(ice, slot);
 
@@ -373,15 +517,20 @@ static int qcom_ice_program_wrapped_key(struct qcom_ice *ice,
 	err = qcom_scm_config_set_ice_key(hwkm_slot, shm.paddr, key->size,
 					  0, 0, 0);
 	if (err) {
-		pr_err("%s:SCM call Error: 0x%x slot %d\n", __func__, err,
-		       slot);
-		return err;
+		pr_err("%s:SCM call Error: 0x%x slot %d hwkm_slot %d\n",
+		       __func__, err, slot, hwkm_slot);
+		goto out_free_shm;
 	}
 
 	/* Enable CFGE after programming key */
 	qcom_ice_writel(ice, cfg.regval, QCOM_ICE_LUT_KEYS_CRYPTOCFG_R16 +
 					 QCOM_ICE_LUT_KEYS_CRYPTOCFG_OFFSET * slot);
 
+out_free_shm:
+	/*
+	 * Always release the shm buffer: returning early leaked it on every
+	 * failed attempt and blk-crypto retries would exhaust the shmbridge pool.
+	 */
 	qtee_shmbridge_inv_shm_buf(&shm);
 	qtee_shmbridge_free_shm(&shm);
 	return err;
