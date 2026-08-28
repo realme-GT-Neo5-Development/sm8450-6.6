@@ -20,6 +20,7 @@
 #include <linux/compiler.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
+#include <linux/of_reserved_mem.h>	/* of_reserved_mem_lookup() */
 #include <linux/mm.h>
 
 #include "internal.h"
@@ -653,13 +654,27 @@ static int ramoops_parse_dt(struct platform_device *pdev,
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	if (!res) {
-		dev_err(&pdev->dev,
-			"failed to locate DT /reserved-memory resource\n");
-		return -EINVAL;
-	}
+		/*
+		 * FORWARDPORT: fallback from msm-5.10. A dynamically allocated
+		 * reserved-memory region (alloc-ranges + size) has no static
+		 * `reg`, so there is no platform resource; look up the base and
+		 * size of the allocated region instead.
+		 */
+		struct reserved_mem *rmem;
 
-	pdata->mem_size = resource_size(res);
-	pdata->mem_address = res->start;
+		rmem = of_reserved_mem_lookup(of_node);
+		if (!rmem) {
+			dev_err(&pdev->dev,
+				"failed to locate DT /reserved-memory resource\n");
+			return -EINVAL;
+		}
+
+		pdata->mem_size = rmem->size;
+		pdata->mem_address = rmem->base;
+	} else {
+		pdata->mem_size = resource_size(res);
+		pdata->mem_address = res->start;
+	}
 	/*
 	 * Setting "unbuffered" is deprecated and will be ignored if
 	 * "mem_type" is also specified.
