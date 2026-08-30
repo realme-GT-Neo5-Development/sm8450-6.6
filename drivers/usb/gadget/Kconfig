@@ -226,6 +226,9 @@ config USB_F_CDEV
 config USB_F_CCID
 	tristate
 
+config USB_F_DIAG
+	tristate
+
 config USB_F_QDSS
 	tristate
 
@@ -576,6 +579,16 @@ config USB_CONFIGFS_F_CCID
 	  endpoint. This driver provides a character device interface
 	  allowing a userspace component to be able to provide the
 	  implementation necessary to interface with the smartcard.
+
+config USB_CONFIGFS_F_DIAG
+	tristate "USB Diag function"
+	select USB_F_DIAG
+	depends on USB_CONFIGFS
+	help
+	  Diag function driver enables support for diagnostics service over USB.
+	  Diagnostics application running on Host receives  stream of log data
+	  over USB. Applications can also send commands to diagnostics client
+	  running on device.
 
 config USB_CONFIGFS_F_QDSS
 	tristate "USB QDSS function"
