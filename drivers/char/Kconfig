@@ -31,6 +31,31 @@ config TTY_PRINTK_LEVEL
 	help
 	  Printk log level to use for ttyprintk messages.
 
+config MSM_ADSPRPC
+	tristate "QTI FastRPC driver"
+	select QCOM_PDR_HELPERS
+	depends on RPMSG && QCOM_SECURE_BUFFER && PM_SLEEP && HAS_DMA && CMA && MMU
+	help
+		Provides a communication mechanism that allows clients to
+		make remote method invocations across processor boundary to
+		applications/compute DSP processor.
+		Say M if you want to enable this module.
+
+config MSM_ADSPRPC_COMPAT
+	bool "FastRPC ioctl translation for 32-bit userspace"
+	depends on MSM_ADSPRPC && COMPAT
+	default n
+	help
+		Translates 32-bit FastRPC ioctl structures for 64-bit kernels.
+		Disabled by default in this tree: the translation layer
+		(adsprpc_compat.c) is written against compat_alloc_user_space(),
+		which was removed from the kernel in 5.11, and rewriting it
+		needs a client to validate against. Senna has no 32-bit vendor
+		userspace at all - /vendor/lib holds only the modules symlink
+		and rfsa/, with no libadsprpc.so - so nothing can reach this
+		path. Enable only after porting adsprpc_compat.c to build the
+		native structures in kernel memory instead of user memory.
+
 config MSM_RDBG
 	tristate "QTI Remote debug driver"
 	help
