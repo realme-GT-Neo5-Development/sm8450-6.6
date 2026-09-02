@@ -558,6 +558,12 @@ static void battery_chg_state_cb(void *priv, enum pmic_glink_state state)
 		bcdev->notify_en = false;
 }
 
+/*
+ * bcdev created by this driver's probe; NULL if probe has not run. Used to
+ * reject calls when the power_supply belongs to the OPlus charger module.
+ */
+static struct battery_chg_dev *bound_bcdev;
+
 /**
  * qti_battery_charger_get_prop() - Gets the property being requested
  *
@@ -582,12 +588,24 @@ int qti_battery_charger_get_prop(const char *name,
 	    strcmp(name, "wireless"))
 		return -EINVAL;
 
+	/*
+	 * This driver does not bind to "qcom,battery-charger" (the OPlus charger
+	 * module owns it), so power_supply_get_by_name() would return the OPlus
+	 * power_supply and power_supply_get_drvdata() the OPlus struct
+	 * battery_chg_dev, which has a different layout. Return -ENODEV unless
+	 * this driver's own probe has run.
+	 */
+	if (!bound_bcdev)
+		return -ENODEV;
+
 	psy = power_supply_get_by_name(name);
 	if (!psy)
 		return -ENODEV;
 
 	bcdev = power_supply_get_drvdata(psy);
 	power_supply_put(psy);
+	if (bcdev != bound_bcdev)
+		return -ENODEV;
 	if (!bcdev)
 		return -ENODEV;
 
@@ -604,6 +622,11 @@ int qti_battery_charger_get_prop(const char *name,
 
 	return rc;
 }
+/*
+ * Keep this export, unlike set_prop below: the in-tree leds-qti-flash module
+ * references it, and modpost fails without it (msm-5.10 exports it too).
+ * With this driver unbound it only returns -ENODEV.
+ */
 EXPORT_SYMBOL(qti_battery_charger_get_prop);
 
 int qti_battery_charger_set_prop(const char *name,
@@ -621,12 +644,24 @@ int qti_battery_charger_set_prop(const char *name,
 	    strcmp(name, "wireless"))
 		return -EINVAL;
 
+	/*
+	 * This driver does not bind to "qcom,battery-charger" (the OPlus charger
+	 * module owns it), so power_supply_get_by_name() would return the OPlus
+	 * power_supply and power_supply_get_drvdata() the OPlus struct
+	 * battery_chg_dev, which has a different layout. Return -ENODEV unless
+	 * this driver's own probe has run.
+	 */
+	if (!bound_bcdev)
+		return -ENODEV;
+
 	psy = power_supply_get_by_name(name);
 	if (!psy)
 		return -ENODEV;
 
 	bcdev = power_supply_get_drvdata(psy);
 	power_supply_put(psy);
+	if (bcdev != bound_bcdev)
+		return -ENODEV;
 	if (!bcdev)
 		return -ENODEV;
 
@@ -641,7 +676,14 @@ int qti_battery_charger_set_prop(const char *name,
 
 	return rc;
 }
-EXPORT_SYMBOL_GPL(qti_battery_charger_set_prop);
+/*
+ * Not exported, matching msm-5.10. The OPlus charger module exports the same
+ * symbol, and a duplicate export makes oplus_chg.ko fail to load
+ * (ENOEXEC). The OPlus copy must win because it operates on the OPlus
+ * struct battery_chg_dev layout; only the module that registers the
+ * power_supply may own it. The only in-kernel user, leds-qpnp-flash-v2, is
+ * not built.
+ */
 
 static bool validate_message(struct battery_chg_dev *bcdev,
 			struct battery_charger_resp_msg *resp_msg, size_t len)
@@ -2605,6 +2647,7 @@ static int battery_chg_probe(struct platform_device *pdev)
 
 	bcdev->restrict_fcc_ua = DEFAULT_RESTRICT_FCC_UA;
 	platform_set_drvdata(pdev, bcdev);
+	bound_bcdev = bcdev;
 	bcdev->fake_soc = -EINVAL;
 	rc = battery_chg_init_psy(bcdev);
 	if (rc < 0)
@@ -2680,17 +2723,31 @@ static int battery_chg_remove(struct platform_device *pdev)
 	cancel_work_sync(&bcdev->battery_check_work);
 	unregister_reboot_notifier(&bcdev->reboot_notifier);
 
+	bound_bcdev = NULL;
+
 	return 0;
 }
 
+/*
+ * No compatible on purpose: "qcom,battery-charger" is owned by the OPlus
+ * charger module (oplus_chg), which registers a platform driver with the
+ * same compatible. Whichever binds first keeps the device, and fixing it via
+ * module load order is not possible (oplus_chg must load after
+ * i2c-msm-geni).
+ *
+ * The module is still loaded because qcom-hv-haptics needs
+ * register_hboost_event_notifier() from it, so it must stay fully passive.
+ * The driver is also renamed: driver_register() rejects a second platform
+ * driver with the same name (-EBUSY), which would make oplus_chg fail to
+ * load. The canonical name, and its sysfs path, is left to OPlus.
+ */
 static const struct of_device_id battery_chg_match_table[] = {
-	{ .compatible = "qcom,battery-charger" },
 	{},
 };
 
 static struct platform_driver battery_chg_driver = {
 	.driver = {
-		.name = "qti_battery_charger",
+		.name = "qti_battery_charger_qcgeneric",
 		.of_match_table = battery_chg_match_table,
 	},
 	.probe = battery_chg_probe,
