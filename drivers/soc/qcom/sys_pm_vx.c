@@ -107,6 +107,24 @@ enum {
 	AOSS_SHUTDOWN_MSG,
 };
 
+/*
+ * FORWARDPORT: cape entry, dropped from the 6.6 table. The CXPC list is
+ * taken verbatim from msm-5.10.
+ *
+ * msm-5.10 had no separate AOSS list; this one is copied from kalama
+ * (identical to pineapple and sun) and is unverified for cape. It only
+ * provides labels for the violator report, so a mistake yields a wrong
+ * name rather than wrong behaviour.
+ */
+static const char * const drv_names_cape[][MAX_DRV_NAMES] = {
+	[CXPC_DRV_NAME] = {"TZ", "HYP", "HLOS", "L3", "SECPROC", "AUDIO", "SENSOR", "AOP",
+			"DEBUG", "GPU", "DISPLAY", "COMPUTE_DSP", "TME_SW", "TME_HW",
+			"MDM SW", "MDM HW", "WLAN RF", "WLAN BB", "DDR AUX", "ARC CPRF",
+			""},
+	[AOSS_DRV_NAME] = {"APPS", "SP", "AUDIO", "AOP", "DEBUG", "GPU", "DISPLAY", "COMPUTE",
+			"TME", "MODEM", "WLAN RF", "WLAN BB", "CAM", ""},
+};
+
 static const char * const drv_names_kalama[][MAX_DRV_NAMES] = {
 	[CXPC_DRV_NAME] = {"TZ", "HYP", "HLOS", "L3", "SECPROC", "AUDIO", "AOP", "DEBUG",
 			"GPU", "DISPLAY", "COMPUTE_DSP", "TME_SW", "TME_HW", "MDM SW",
@@ -534,6 +552,8 @@ static void vx_create_debug_nodes(struct dentry *root, struct vx_platform_data *
 }
 
 static const struct of_device_id drv_match_table[] = {
+	{ .compatible = "qcom,sys-pm-cape",
+	  .data = drv_names_cape },
 	{ .compatible = "qcom,sys-pm-kalama",
 	  .data = drv_names_kalama },
 	{ .compatible = "qcom,sys-pm-pineapple",
@@ -554,9 +574,15 @@ static int vx_probe(struct platform_device *pdev)
 	if (!pd)
 		return -ENOMEM;
 
+	/*
+	 * of_iomap() returns NULL on failure, not ERR_PTR, so PTR_ERR() would
+	 * report success with a NULL base.
+	 */
 	pd->base = of_iomap(pdev->dev.of_node, 0);
-	if (IS_ERR_OR_NULL(pd->base))
-		return PTR_ERR(pd->base);
+	if (!pd->base) {
+		dev_err(&pdev->dev, "SYSPMVX: of_iomap(reg[0]) returned NULL\n");
+		return -ENOMEM;
+	}
 
 	match_id = of_match_node(drv_match_table, pdev->dev.of_node);
 	if (!match_id)
@@ -581,9 +607,17 @@ static int vx_probe(struct platform_device *pdev)
 	pd->n_aoss_drv = i;
 	pd->aoss_drvs = &drvs[MAX_DRV_NAMES];
 
+	/*
+	 * debugfs_create_dir() returns ERR_PTR, not NULL, on failure; check both
+	 * so that the error path does not pass an ERR_PTR on.
+	 */
 	pd->vx_dir = debugfs_create_dir("sys_pm_vx", NULL);
-	if (!pd->vx_dir)
+	if (IS_ERR_OR_NULL(pd->vx_dir)) {
+		dev_err(&pdev->dev, "SYSPMVX: debugfs_create_dir failed (%ld)\n",
+			PTR_ERR(pd->vx_dir));
+		pd->vx_dir = NULL;
 		return -EINVAL;
+	}
 
 	vx_create_debug_nodes(pd->vx_dir, pd);
 
