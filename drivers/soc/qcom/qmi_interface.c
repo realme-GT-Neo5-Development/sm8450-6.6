@@ -854,3 +854,13 @@ ssize_t qmi_send_indication(struct qmi_handle *qmi, struct sockaddr_qrtr *sq,
 	return rval;
 }
 EXPORT_SYMBOL(qmi_send_indication);
+
+/*
+ * FORWARDPORT: soft dependency from msm-5.10.
+ *
+ * qmi_handle_init() creates an AF_QIPCRTR socket, which fails with
+ * -EAFNOSUPPORT until qrtr has registered the protocol family. There is
+ * no symbol dependency on qrtr, so with parallel module loading the order
+ * would otherwise be random.
+ */
+MODULE_SOFTDEP("pre: qrtr");
