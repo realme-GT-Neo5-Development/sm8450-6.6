@@ -29,6 +29,21 @@
 
 #define SCMI_MAX_CHANNELS		256
 
+/*
+ * FORWARDPORT: capacity of the implemented-protocols list.
+ *
+ * 6.6 sized the list, and bounded the loop reading it, by num_protocols
+ * from BASE_PROTOCOL_ATTRIBUTES. The CPUCP firmware on this SoC declares
+ * fewer protocols than it then enumerates, so the read aborted with
+ * "No. Returned protocols > Total protocols" and vendor protocols 0x81 (PLH)
+ * and 0x87 (C1DCVS) were reported as not implemented.
+ *
+ * msm-5.10 used a fixed limit and ignored the declared count. Protocol IDs
+ * are 8-bit, so 256 bounds the list regardless of what firmware returns,
+ * at a cost of 256 bytes per controller.
+ */
+#define MAX_PROTOCOLS_IMP		256
+
 #define SCMI_MAX_RESPONSE_TIMEOUT	(2 * MSEC_PER_SEC)
 
 enum scmi_error_codes {
