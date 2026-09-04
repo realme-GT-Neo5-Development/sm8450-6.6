@@ -207,9 +207,14 @@ scmi_base_implementation_list_get(const struct scmi_protocol_handle *ph,
 		if (!loop_num_ret)
 			break;
 
-		if (loop_num_ret > rev->num_protocols - tot_num_ret) {
+		/*
+		 * Bound by the buffer size, not the firmware-declared count; see
+		 * MAX_PROTOCOLS_IMP in common.h.
+		 */
+		if (loop_num_ret > MAX_PROTOCOLS_IMP - tot_num_ret) {
 			dev_err(dev,
-				"No. Returned protocols > Total protocols.\n");
+				"Too many protocols: %u returned, %u read, cap %u\n",
+				loop_num_ret, tot_num_ret, MAX_PROTOCOLS_IMP);
 			break;
 		}
 
@@ -394,7 +399,11 @@ static int scmi_base_protocol_init(const struct scmi_protocol_handle *ph)
 	if (ret)
 		return ret;
 
-	prot_imp = devm_kcalloc(dev, rev->num_protocols, sizeof(u8),
+	/*
+	 * Size the buffer to a fixed cap rather than rev->num_protocols: firmware
+	 * may return more protocols than it declares (see common.h).
+	 */
+	prot_imp = devm_kcalloc(dev, MAX_PROTOCOLS_IMP, sizeof(u8),
 				GFP_KERNEL);
 	if (!prot_imp)
 		return -ENOMEM;

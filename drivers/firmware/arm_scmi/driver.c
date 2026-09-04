@@ -1992,12 +1992,16 @@ scmi_is_protocol_implemented(const struct scmi_handle *handle, u8 prot_id)
 {
 	int i;
 	struct scmi_info *info = handle_to_scmi_info(handle);
-	struct scmi_revision_info *rev = handle->version;
 
 	if (!info->protocols_imp)
 		return false;
 
-	for (i = 0; i < rev->num_protocols; i++)
+	/*
+	 * Scan the whole buffer, not rev->num_protocols: firmware under-reports
+	 * the count while the extra entries are valid. Unused slots are zero from
+	 * kcalloc and 0 is not a valid protocol ID. See common.h.
+	 */
+	for (i = 0; i < MAX_PROTOCOLS_IMP; i++)
 		if (info->protocols_imp[i] == prot_id)
 			return true;
 	return false;
