@@ -1527,9 +1527,15 @@ static int qsmmuv500_tbu_probe(struct platform_device *pdev)
 	tbu->sid_start = of_read_number(cell, 1);
 	tbu->num_sids = of_read_number(cell + 1, 1);
 
+	/*
+	 * FORWARDPORT: restore the msm-5.10 behaviour. When qcom,iova-width is
+	 * absent from DT, fall back to QCOM_IOVA_WIDTH_DEFAULT (36). 6.6 made the
+	 * property mandatory and returns -EINVAL, but no waipio/cape TBU node sets
+	 * it; without the TBUs SMMU, DMA and therefore UFS fail to come up.
+	 */
 	ret = of_property_read_u32(dev->of_node, "qcom,iova-width", &tbu->iova_width);
 	if (ret < 0)
-		return ret;
+		tbu->iova_width = 36;
 
 	dev_set_drvdata(dev, tbu);
 	return 0;

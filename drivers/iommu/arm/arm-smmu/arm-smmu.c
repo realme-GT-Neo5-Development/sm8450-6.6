@@ -3133,6 +3133,7 @@ static int arm_smmu_handoff_cbs(struct arm_smmu_device *smmu)
 			if (!handoff_smrs[index].valid)
 				continue;
 
+
 			/* smrs is subset of handoff_smrs */
 			if ((handoff_smrs[index].mask & smrs.mask) == smrs.mask &&
 			    !((handoff_smrs[index].id ^ smrs.id) & ~handoff_smrs[index].mask)) {
@@ -3177,6 +3178,7 @@ static int arm_smmu_device_cfg_probe(struct arm_smmu_device *smmu)
 {
 	unsigned int size;
 	u32 id;
+	u32 num_mapping_groups_override, num_context_banks_override;
 	bool cttw_reg, cttw_fw = smmu->features & ARM_SMMU_FEAT_COHERENT_WALK;
 	int i, ret;
 
@@ -3268,6 +3270,19 @@ static int arm_smmu_device_cfg_probe(struct arm_smmu_device *smmu)
 	for (i = 0; i < size; i++)
 		smmu->s2crs[i] = s2cr_init_val;
 
+	/*
+	 * FORWARDPORT: some SMRs and context banks belong to TrustZone. The DT
+	 * declares limits that HLOS must not exceed; the 6.6 driver lost support
+	 * for them, so arm_smmu_device_reset() also wiped the TZ-owned entries.
+	 */
+	ret = of_property_read_u32(smmu->dev->of_node, "qcom,num-smr-override",
+				   &num_mapping_groups_override);
+	if (!ret && size > num_mapping_groups_override) {
+		dev_notice(smmu->dev, "%u mapping groups overridden to %u\n",
+			   size, num_mapping_groups_override);
+		size = num_mapping_groups_override;
+	}
+
 	smmu->num_mapping_groups = size;
 	mutex_init(&smmu->stream_map_mutex);
 	spin_lock_init(&smmu->global_sync_lock);
@@ -3297,6 +3312,17 @@ static int arm_smmu_device_cfg_probe(struct arm_smmu_device *smmu)
 
 	smmu->num_s2_context_banks = FIELD_GET(ARM_SMMU_ID1_NUMS2CB, id);
 	smmu->num_context_banks = FIELD_GET(ARM_SMMU_ID1_NUMCB, id);
+
+	/* FORWARDPORT: context banks above the DT limit belong to TrustZone */
+	ret = of_property_read_u32(smmu->dev->of_node,
+				   "qcom,num-context-banks-override",
+				   &num_context_banks_override);
+	if (!ret && smmu->num_context_banks > num_context_banks_override) {
+		dev_notice(smmu->dev, "%u context banks overridden to %u\n",
+			   smmu->num_context_banks, num_context_banks_override);
+		smmu->num_context_banks = num_context_banks_override;
+	}
+
 	if (smmu->num_s2_context_banks > smmu->num_context_banks) {
 		dev_err(smmu->dev, "impossible number of S2 context banks!\n");
 		return -ENODEV;
