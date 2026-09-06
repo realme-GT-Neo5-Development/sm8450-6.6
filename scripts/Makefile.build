@@ -29,6 +29,11 @@ ccflags-y  :=
 rustflags-y :=
 cppflags-y :=
 ldflags-y  :=
+# FORWARDPORT: optional extra linker script attached to a module, from the
+# OPlus 5.10 vendor code (OPLUS_FEATURE_CHG_BASIC). Used by the OPlus charger
+# modules to emit the .oplus_chg_module.data section and the
+# __oplus_chg_module_start/_end symbols.
+KBUILD_LDS_MODULE_ATTACH :=
 
 subdir-asflags-y :=
 subdir-ccflags-y :=
@@ -248,8 +253,15 @@ $(obj)/%.o: $(src)/%.c $(recordmcount_source) FORCE
 cmd_mod = printf '%s\n' $(call real-search, $*.o, .o, -objs -y -m) | \
 	$(AWK) '!x[$$0]++ { print("$(obj)/"$$0) }' > $@
 
+# See KBUILD_LDS_MODULE_ATTACH above. Copies the linker script next to the
+# module as <module>.lds; Makefile.modfinal passes it as a second -T when
+# linking the .ko.
+quiet_cmd_mod_lds = LDS     $(@:.mod=.lds)
+      cmd_mod_lds = cat $(srctree)/$(src)/$(firstword $(KBUILD_LDS_MODULE_ATTACH)) > $(@:.mod=.lds)
+
 $(obj)/%.mod: FORCE
 	$(call if_changed,mod)
+	$(if $(KBUILD_LDS_MODULE_ATTACH),$(call cmd,mod_lds))
 
 quiet_cmd_cc_lst_c = MKLST   $@
       cmd_cc_lst_c = $(CC) $(c_flags) -g -c -o $*.o $< && \
