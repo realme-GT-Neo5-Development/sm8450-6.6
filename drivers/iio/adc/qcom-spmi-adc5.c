@@ -1104,6 +1104,22 @@ static int adc5_get_fw_channel_data(struct adc5_chip *adc,
 		prop->avg_samples = VADC_DEF_AVG_SAMPLES;
 	}
 
+	/*
+	 * Forward-ported from msm-5.10: allow devicetree to override the scaling
+	 * function. 6.6 always uses the built-in adc_chans[] entry.
+	 *
+	 * OPlus wires three thermistors (usb_temp_adc, usb_supplementary_temp_adc,
+	 * subboard_temp_adc) to ADC7_GPIO{1,2,4}_100K_PU and requests
+	 * ADC_SCALE_HW_CALIB_DEFAULT, i.e. raw voltage in uV, because the charger
+	 * driver applies its own NTC table. The built-in entry returns millidegrees
+	 * instead, which the charger misreads as ~117 C (battery temperature also
+	 * comes from the subboard NTC) and triggers an emergency power-off.
+	 */
+	prop->scale_fn_type = -EINVAL;
+	ret = fwnode_property_read_u32(fwnode, "qcom,scale-fn-type", &value);
+	if (!ret && value < SCALE_HW_CALIB_INVALID)
+		prop->scale_fn_type = value;
+
 	if (fwnode_property_read_bool(fwnode, "qcom,ratiometric"))
 		prop->cal_method = ADC5_RATIOMETRIC_CAL;
 	else if (fwnode_property_read_bool(fwnode, "qcom,no-cal"))
@@ -1258,8 +1274,13 @@ static int adc5_get_fw_data(struct adc5_chip *adc)
 			return ret;
 		}
 
-		prop.scale_fn_type =
-			adc->data->adc_chans[prop.channel].scale_fn_type;
+		/*
+		 * Forward-ported from msm-5.10: the table entry is only a default,
+		 * devicetree takes precedence. See "qcom,scale-fn-type" above.
+		 */
+		if (prop.scale_fn_type == -EINVAL)
+			prop.scale_fn_type =
+				adc->data->adc_chans[prop.channel].scale_fn_type;
 		*chan_props = prop;
 		adc_chan = &adc->data->adc_chans[prop.channel];
 
