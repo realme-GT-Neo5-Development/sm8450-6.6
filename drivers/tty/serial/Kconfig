@@ -915,6 +915,50 @@ config SERIAL_MSM_GENI
     depends on ARCH_QCOM
     depends on QCOM_GENI_SE
 
+# FORWARDPORT: these options were lost from Kconfig in 6.6.
+# msm_geni_serial.c depends on them; without them the console code,
+# including the "qcom,msm-geni-console" match entry, is compiled out, the
+# console UART node stays unbound and icc_sync_state() never runs, leaving
+# the boot-time interconnect votes at INT_MAX.
+config SERIAL_MSM_GENI_CONSOLE_DEFAULT_ENABLED
+	bool "Enable MSM on-chip GENI serial port for kernel console usage"
+	default y
+	depends on SERIAL_MSM_GENI
+	help
+	  Runtime enablement of serial HW for kernel can be controlled using
+	  msm_geni_serial.con_enabled=1. This is useful for kernels that should
+	  have serial driver compiled, but not used for performance.
+	  This option controls the default value for con_enabled.
+
+	  If unsure, say Y.
+
+config SERIAL_MSM_GENI_HALF_SAMPLING
+	bool "Changes clock divider which impacts sampling rate for QUP HW ver greater than 2.5.0"
+	depends on SERIAL_MSM_GENI
+	help
+	  Clock divider value should be doubled for QUP hardware version
+	  greater than 2.5.0.
+	  As earlycon can't have HW version awareness, decision is taken
+	  based on the configuration.
+
+config SERIAL_MSM_GENI_EARLY_CONSOLE
+	bool "MSM on-chip GENI HW based early console support"
+	select SERIAL_CORE_CONSOLE
+	select SERIAL_EARLYCON
+	help
+	  Serial early console driver for Qualcomm Technologies Inc's GENI
+	  based QUP hardware.
+
+config SERIAL_MSM_GENI_CONSOLE
+	tristate "MSM on-chip GENI HW based console support"
+	depends on SERIAL_MSM_GENI
+	select SERIAL_CORE_CONSOLE
+	select SERIAL_EARLYCON
+	select SERIAL_MSM_GENI_EARLY_CONSOLE
+	help
+	    Serial console driver for Qualcomm Technologies Inc's GENI based
+	    QUP hardware.
+
 config SERIAL_VT8500
 	bool "VIA VT8500 on-chip serial port support"
 	depends on ARCH_VT8500 || COMPILE_TEST
