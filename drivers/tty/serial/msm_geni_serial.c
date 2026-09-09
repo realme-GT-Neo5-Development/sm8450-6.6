@@ -1728,7 +1728,11 @@ static void msm_geni_serial_poll_put_char(struct uart_port *uport,
 
 #if IS_ENABLED(CONFIG_SERIAL_MSM_GENI_CONSOLE) || \
 					IS_ENABLED(CONFIG_CONSOLE_POLL)
-static void msm_geni_serial_wr_char(struct uart_port *uport, int ch)
+/*
+ * FORWARDPORT: uart_console_write() expects a void callback in 6.6
+ * (it returned int before). The body is unchanged.
+ */
+static void msm_geni_serial_wr_char(struct uart_port *uport, unsigned char ch)
 {
 	geni_write_reg(ch, uport->membase, SE_GENI_TX_FIFOn);
 	/*
@@ -4685,8 +4689,14 @@ static int msm_geni_console_setup(struct console *co, char *options)
 	if (msm_geni_serial_resources_on(dev_port))
 		WARN_ON(1);
 
-	if (unlikely(get_se_proto(uport->membase) != GENI_SE_UART)) {
-		msm_geni_serial_resources_off(dev_por);
+	/*
+	 * FORWARDPORT: get_se_proto() does not exist in 6.6; use
+	 * geni_se_common_get_proto() from <linux/qcom-geni-se-common.h>.
+	 * Also fixes a vendor typo (dev_por instead of dev_port) that was never
+	 * compiled because CONFIG_SERIAL_MSM_GENI_CONSOLE was not enabled.
+	 */
+	if (unlikely(geni_se_common_get_proto(uport->membase) != GENI_SE_UART)) {
+		msm_geni_serial_resources_off(dev_port);
 		return -ENXIO;
 	}
 
