@@ -965,4 +965,7 @@ source "drivers/leds/trigger/Kconfig"
 comment "Simple LED drivers"
 source "drivers/leds/simple/Kconfig"
 
+# FORWARDPORT from 5.10: AW210XX breathing LED on the SE2 I2C bus.
+source "drivers/leds/aw210xx/Kconfig"
+
 endif # NEW_LEDS
