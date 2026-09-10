@@ -8,10 +8,17 @@
 #include <linux/of_device.h>
 #include <linux/platform_device.h>
 #include <linux/pinctrl/pinctrl.h>
-#include <trace/hooks/gpiolib.h>
 
 #include "pinctrl-msm.h"
 #include "pinctrl-waipio.h"
+
+/*
+ * FORWARDPORT: `.egpio_func`; see the comment in pinctrl-cape.c. Without it
+ * eGPIO-capable pads are never claimed by HLOS. 9 is the slot index within
+ * the group (PINGROUP has gpio + f1..f9), as in mainline pinctrl-sm8450.c;
+ * no waipio pin has a real function in slot 9.
+ */
+#define WAIPIO_EGPIO_FUNC 9
 
 static const struct msm_pinctrl_soc_data waipio_pinctrl = {
 	.pins = waipio_pins,
@@ -25,6 +32,7 @@ static const struct msm_pinctrl_soc_data waipio_pinctrl = {
 	.nwakeirq_map = ARRAY_SIZE(waipio_pdc_map),
 	.qup_regs = waipio_qup_regs,
 	.nqup_regs = ARRAY_SIZE(waipio_qup_regs),
+	.egpio_func = WAIPIO_EGPIO_FUNC,
 };
 
 static const struct msm_pinctrl_soc_data waipio_vm_pinctrl = {
@@ -35,27 +43,22 @@ static const struct msm_pinctrl_soc_data waipio_vm_pinctrl = {
 	.groups = waipio_groups,
 	.ngroups = ARRAY_SIZE(waipio_groups),
 	.ngpios = 211,
+	.egpio_func = WAIPIO_EGPIO_FUNC,
 };
 
-static void qcom_trace_gpio_read(void *unused,
-				 struct gpio_device *gdev,
-				 bool *block_gpio_read)
-{
-	*block_gpio_read = true;
-}
-
+/*
+ * TODO: msm-5.10 registered android_vh_gpio_block_read here for
+ * "qcom,waipio-vm-pinctrl" to block GPIO reads inside the Gunyah VM. The
+ * hook does not exist in 6.6 and is not in the GKI KMI. Only affects the
+ * waipio-tuivm target; restore if a VM variant is ever built.
+ */
 static int qcom_msm_pinctrl_probe(struct platform_device *pdev)
 {
 	const struct msm_pinctrl_soc_data *pinctrl_data;
-	struct device *dev = &pdev->dev;
 
 	pinctrl_data = of_device_get_match_data(&pdev->dev);
 	if (!pinctrl_data)
 		return -EINVAL;
-
-	if (of_device_is_compatible(dev->of_node, "qcom,waipio-vm-pinctrl"))
-		register_trace_android_vh_gpio_block_read(qcom_trace_gpio_read,
-							  NULL);
 
 	return msm_pinctrl_probe(pdev, pinctrl_data);
 }
