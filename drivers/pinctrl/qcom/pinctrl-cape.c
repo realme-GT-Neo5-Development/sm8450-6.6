@@ -8,10 +8,32 @@
 #include <linux/of_device.h>
 #include <linux/platform_device.h>
 #include <linux/pinctrl/pinctrl.h>
-#include <trace/hooks/gpiolib.h>
 
 #include "pinctrl-msm.h"
 #include "pinctrl-cape.h"
+
+/*
+ * FORWARDPORT: `.egpio_func`, a field that did not exist in msm-5.10.
+ *
+ * msm-5.10 unconditionally claimed the pad for APPS on every mux change:
+ *
+ *     if (val & BIT(g->egpio_present))
+ *             val |= BIT(g->egpio_enable);
+ *
+ * 6.6 gates this on `egpio_func` (msm_pinmux_set_mux()). Without it an
+ * eGPIO-capable pad is never taken over by HLOS: the TLMM register accepts
+ * writes, but the pad is still driven by the remote master.
+ *
+ * 9 is the function index within the group, not in `functions`
+ * (msm_pinmux_set_mux() matches g->funcs[i] == function). PINGROUP has
+ * 10 slots (gpio + f1..f9), so egpio sits in slot 9, as in mainline
+ * pinctrl-sm8450.c. No cape pin has a real function in slot 9, so the
+ * branch that hands a pad back to the remote master cannot trigger.
+ *
+ * This also makes msm_gpio_dbg_show_one() report `egpio` for pads owned by
+ * the remote master, which it only does when egpio_func is non-zero.
+ */
+#define CAPE_EGPIO_FUNC 9
 
 static const struct msm_pinctrl_soc_data cape_pinctrl = {
 	.pins = cape_pins,
@@ -25,6 +47,7 @@ static const struct msm_pinctrl_soc_data cape_pinctrl = {
 	.nqup_regs = ARRAY_SIZE(cape_qup_regs),
 	.wakeirq_map = cape_pdc_map,
 	.nwakeirq_map = ARRAY_SIZE(cape_pdc_map),
+	.egpio_func = CAPE_EGPIO_FUNC,
 };
 
 static const struct msm_pinctrl_soc_data cape_vm_pinctrl = {
@@ -35,26 +58,22 @@ static const struct msm_pinctrl_soc_data cape_vm_pinctrl = {
 	.groups = cape_groups,
 	.ngroups = ARRAY_SIZE(cape_groups),
 	.ngpios = 211,
+	.egpio_func = CAPE_EGPIO_FUNC,
 };
 
-static void qcom_trace_gpio_read(void *unused, struct gpio_device *gdev,
-				 bool *block_gpio_read)
-{
-	*block_gpio_read = true;
-}
-
+/*
+ * TODO: msm-5.10 registered android_vh_gpio_block_read here for
+ * "qcom,cape-vm-pinctrl" to block GPIO reads inside the Gunyah VM. The hook
+ * does not exist in 6.6 and is not in the GKI KMI. Only affects the
+ * cape-tuivm target; restore if a VM variant is ever built.
+ */
 static int cape_pinctrl_probe(struct platform_device *pdev)
 {
 	const struct msm_pinctrl_soc_data *pinctrl_data;
-	struct device *dev = &pdev->dev;
 
 	pinctrl_data = of_device_get_match_data(&pdev->dev);
 	if (!pinctrl_data)
 		return -EINVAL;
-
-	if (of_device_is_compatible(dev->of_node, "qcom,cape-vm-pinctrl"))
-		register_trace_android_vh_gpio_block_read(qcom_trace_gpio_read,
-							  NULL);
 
 	return msm_pinctrl_probe(pdev, pinctrl_data);
 }
