@@ -365,11 +365,18 @@
 #define PCIE_DBG3(dev, fmt, arg...)
 #define PCIE_DUMP(dev, fmt, arg...)
 
-#define PCIE_DBG_FS(dev, fmt, arg...) pr_alert("%s: " fmt, __func__, arg)
+/*
+ * ##arg is required: these macros are also invoked without variadic
+ * arguments, e.g. PCIE_DBG_FS(dev, "PCIe L1ss sleep is not supported\n").
+ * Without it the preprocessor leaves a trailing comma and compilation
+ * fails with "expected expression". This branch is only reached when
+ * CONFIG_IPC_LOGGING is disabled, which other 6.6 targets do not do.
+ */
+#define PCIE_DBG_FS(dev, fmt, arg...) pr_alert("%s: " fmt, __func__, ##arg)
 
-#define PCIE_INFO(dev, fmt, arg...) pr_info("%s: " fmt, __func__, arg)
+#define PCIE_INFO(dev, fmt, arg...) pr_info("%s: " fmt, __func__, ##arg)
 
-#define PCIE_ERR(dev, fmt, arg...) pr_err("%s: " fmt, __func__, arg)
+#define PCIE_ERR(dev, fmt, arg...) pr_err("%s: " fmt, __func__, ##arg)
 
 #endif /* CONFIG_IPC_LOGGING */
 
@@ -1123,6 +1130,9 @@ struct msm_pcie_dev_t {
 	bool l1_2_aspm_supported;
 	uint32_t l1_2_th_scale;
 	uint32_t l1_2_th_value;
+	/* T_POWER_ON for L1.2 exit; see msm_pcie_config_l1_2_threshold() */
+	uint32_t l1_2_tpoweron_scale;
+	uint32_t l1_2_tpoweron_value;
 	bool common_clk_en;
 	bool clk_power_manage_en;
 	bool aux_clk_sync;
@@ -3893,8 +3903,14 @@ static void __maybe_unused
 	msm_pcie_write_reg(dev->parf, PCIE20_PARF_L1SUB_AHB_CLK_MAX_TIMER, 0);
 }
 
-/* Read the curr perf ol value from the cesta register */
-static const char *const msm_pcie_cesta_curr_perf_ol(struct msm_pcie_dev_t *dev)
+/*
+ * Read the curr perf ol value from the cesta register.
+ *
+ * Only called from PCIE_DBG(), which expands to nothing when
+ * CONFIG_IPC_LOGGING is disabled; hence __maybe_unused.
+ */
+static const char *const __maybe_unused
+msm_pcie_cesta_curr_perf_ol(struct msm_pcie_dev_t *dev)
 {
 	u32 ret;
 	int res;
@@ -7992,11 +8008,54 @@ static int msm_pcie_config_l1_2_threshold(struct pci_dev *pdev, void *dev)
 
 	l1ss_ctl1_offset = l1ss_cap_id_offset + PCI_L1SS_CTL1;
 
-	msm_pcie_config_clear_set_dword(pdev, l1ss_ctl1_offset, 0,
+	/*
+	 * FORWARDPORT: the clear mask was 0, so the new threshold was ORed into
+	 * the old one. msm-5.10 clears both fields before writing; restore that.
+	 */
+	msm_pcie_config_clear_set_dword(pdev, l1ss_ctl1_offset,
+		(PCI_L1SS_CTL1_LTR_L12_TH_SCALE |
+		 PCI_L1SS_CTL1_LTR_L12_TH_VALUE),
 		(PCI_L1SS_CTL1_LTR_L12_TH_SCALE &
 		(pcie_dev->l1_2_th_scale << l1_2_th_scale_shift)) |
 		(PCI_L1SS_CTL1_LTR_L12_TH_VALUE &
 		(pcie_dev->l1_2_th_value << l1_2_th_value_shift)));
+
+	/*
+	 * FORWARDPORT: program T_POWER_ON (L1SS_CTL2), the time the port waits
+	 * for power to stabilise when exiting L1.2.
+	 *
+	 * Neither this driver nor core ASPM programs it here: aspm_calc_l1ss_info()
+	 * derives it from the T_POWER_ON fields in both ports' L1SS capability
+	 * registers, which read as zero on this hardware, leaving the reset default
+	 * of 10 us. With 10 us the WLAN firmware fails to respond after wakeup
+	 * ("Timeout waiting for resume event from FW", firmware hang); disabling
+	 * L1SS avoids it, so the problem is on L1.2 exit.
+	 *
+	 * Writing CTL2 via sysfs does not stick because pci_restore_state()
+	 * restores the saved config space on resume. This function runs through
+	 * pci_walk_bus() on both ports every time L1SS is enabled, including after
+	 * a state restore.
+	 *
+	 * The value comes from DT; if the property is absent nothing is changed.
+	 */
+	if (pcie_dev->l1_2_tpoweron_value) {
+		/*
+		 * PCIe r4.0 sec 7.8.3.4, L1 PM Substates Control 2:
+		 *   bits [1:0] T_POWER_ON Scale (0 = 2 us, 1 = 10 us, 2 = 100 us)
+		 *   bits [7:3] T_POWER_ON Value
+		 * pci_regs.h only defines the CTL2 offset, not the field masks.
+		 */
+		u32 ctl2 = ((pcie_dev->l1_2_tpoweron_value << 3) & 0xf8) |
+			   (pcie_dev->l1_2_tpoweron_scale & 0x3);
+
+		pci_write_config_dword(pdev,
+			l1ss_cap_id_offset + PCI_L1SS_CTL2, ctl2);
+
+		PCIE_DBG(pcie_dev,
+			"PCIe: RC%d: %02x:%02x.%01x L1SS_CTL2 = 0x%x (T_POWER_ON)\n",
+			pcie_dev->rc_idx, pdev->bus->number,
+			PCI_SLOT(pdev->devfn), PCI_FUNC(pdev->devfn), ctl2);
+	}
 
 	return 0;
 }
@@ -8205,6 +8264,14 @@ static void msm_pcie_read_dt(struct msm_pcie_dev_t *pcie_dev, int rc_idx,
 	PCIE_DBG(pcie_dev, "PCIe: RC%d: L1.2 threshold scale: %d value: %d.\n",
 		pcie_dev->rc_idx, pcie_dev->l1_2_th_scale,
 		pcie_dev->l1_2_th_value);
+
+	of_property_read_u32(of_node, "qcom,l1-2-tpoweron-scale",
+				&pcie_dev->l1_2_tpoweron_scale);
+	of_property_read_u32(of_node, "qcom,l1-2-tpoweron-value",
+				&pcie_dev->l1_2_tpoweron_value);
+	PCIE_DBG(pcie_dev, "PCIe: RC%d: L1.2 T_POWER_ON scale: %d value: %d.\n",
+		pcie_dev->rc_idx, pcie_dev->l1_2_tpoweron_scale,
+		pcie_dev->l1_2_tpoweron_value);
 
 	pcie_dev->common_clk_en = of_property_read_bool(of_node,
 				"qcom,common-clk-en");
@@ -10086,12 +10153,22 @@ static int msm_pcie_drv_suspend(struct msm_pcie_dev_t *pcie_dev,
 		if (clk_info->hdl && !clk_info->suppressible)
 			clk_disable_unprepare(clk_info->hdl);
 
-	/* enable L1ss sleep if client allows it */
-	if (!pcie_dev->l1ss_sleep_disable &&
-		!(options & MSM_PCIE_CONFIG_NO_L1SS_TO))
-		msm_pcie_drv_send_rpmsg(pcie_dev,
-					&drv_info->drv_enable_l1ss_sleep);
-
+	/*
+	 * FORWARDPORT: restore the msm-5.10 ordering.
+	 *
+	 * 6.6 sent ENABLE_L1SS_SLEEP to LPASS before dropping the ICC vote and
+	 * disabling gdsc-core and the PHY analog rails. msm-5.10 tears down power
+	 * first and only then lets LPASS put the link to sleep:
+	 *
+	 *   5.10: clk off -> icc 0 -> gdsc off -> vreg_deinit -> ENABLE_L1SS_SLEEP
+	 *   6.6 : clk off -> ENABLE_L1SS_SLEEP -> icc -> gdsc off -> vreg_deinit
+	 *
+	 * msm_pcie_drv_send_rpmsg() waits for the LPASS ACK, after which LPASS may
+	 * already move the link into L1.2 while the host is still disabling
+	 * vreg-0p9, vreg-1p2 and gdsc-core. The resulting race shows up as
+	 * intermittent "Timeout waiting for resume event from FW" / "credits 0"
+	 * from WLAN and, at worst, "PCI link down".
+	 */
 	ret = msm_pcie_icc_vote(pcie_dev, ab, ib, true);
 	if (ret) {
 		mutex_unlock(&pcie_dev->setup_lock);
@@ -10107,6 +10184,12 @@ static int msm_pcie_drv_suspend(struct msm_pcie_dev_t *pcie_dev,
 	}
 
 	msm_pcie_vreg_deinit(pcie_dev);
+
+	/* enable L1ss sleep if client allows it */
+	if (!pcie_dev->l1ss_sleep_disable &&
+		!(options & MSM_PCIE_CONFIG_NO_L1SS_TO))
+		msm_pcie_drv_send_rpmsg(pcie_dev,
+					&drv_info->drv_enable_l1ss_sleep);
 
 	mutex_unlock(&pcie_dev->setup_lock);
 	mutex_unlock(&pcie_dev->recovery_lock);
@@ -10224,7 +10307,11 @@ static int msm_pcie_handle_pm_resume(struct msm_pcie_dev_t *pcie_dev,
 					void *data, void *user, u32 options)
 {
 	struct msm_pcie_device_info *dev_info_itr, *temp, *dev_info = NULL;
-	struct pci_dev *pcidev = (struct pci_dev *)user;
+	/*
+	 * pcidev is only used inside PCIE_DBG(), which expands to nothing when
+	 * CONFIG_IPC_LOGGING is disabled.
+	 */
+	struct pci_dev *pcidev __maybe_unused = (struct pci_dev *)user;
 	struct pci_dev *dev = pcie_dev->dev;
 	int ret;
 
