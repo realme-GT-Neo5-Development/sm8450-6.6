@@ -701,19 +701,15 @@ static int ucsi_register_partner_pdos(struct ucsi_connector *con)
 		con->partner_source_caps = cap;
 	}
 
-	ret = ucsi_get_pdos(con, TYPEC_SINK, 1, caps.pdo);
-	if (ret > 0) {
-		if (ret < PDO_MAX_OBJECTS)
-			caps.pdo[ret] = 0;
-
-		caps.role = TYPEC_SINK;
-
-		cap = usb_power_delivery_register_capabilities(con->partner_pd, &caps);
-		if (IS_ERR(cap))
-			return PTR_ERR(cap);
-
-		con->partner_sink_caps = cap;
-	}
+	/*
+	 * Do not query the partner's sink PDOs. The PMIC GLINK PPM firmware on
+	 * waipio/cape answers this with BUSY while it asks the partner for
+	 * Sink_Capabilities; if the partner never replies (a charger busy
+	 * switching modes, or unplugged meanwhile) the command never completes
+	 * and the PPM stops reporting connector changes, leaving the partner
+	 * and its power supply online after unplug. msm-5.10 did not read them
+	 * either; they are only exported through sysfs.
+	 */
 
 	return typec_partner_set_usb_power_delivery(con->partner, con->partner_pd);
 }

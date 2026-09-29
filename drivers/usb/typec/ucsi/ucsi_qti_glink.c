@@ -33,6 +33,7 @@
 
 /* Generic definitions */
 #define CMD_PENDING			1
+#define CMD_BUSY			2
 #define UCSI_LOG_BUF_SIZE		256
 #define NUM_LOG_PAGES			10
 #define UCSI_WAIT_TIME_MS		5000
@@ -262,6 +263,8 @@ static int handle_ucsi_notify(struct ucsi_dev *udev, void *data, size_t len)
 		cci & (UCSI_CCI_ACK_COMPLETE | UCSI_CCI_COMMAND_COMPLETE)) {
 		pr_debug("received ack\n");
 		complete(&udev->sync_write_ack);
+	} else if (test_bit(CMD_PENDING, &udev->flags) && cci & UCSI_CCI_BUSY) {
+		set_bit(CMD_BUSY, &udev->flags);
 	}
 
 	con_num = UCSI_CCI_CONNECTOR(cci);
@@ -346,6 +349,7 @@ static int ucsi_qti_glink_write(struct ucsi_dev *udev, unsigned int offset,
 	reinit_completion(&udev->write_ack);
 
 	if (sync) {
+		clear_bit(CMD_BUSY, &udev->flags);
 		set_bit(CMD_PENDING, &udev->flags);
 		reinit_completion(&udev->sync_write_ack);
 	}
@@ -370,6 +374,16 @@ static int ucsi_qti_glink_write(struct ucsi_dev *udev, unsigned int offset,
 	if (sync) {
 		rc = wait_for_completion_timeout(&udev->sync_write_ack,
 					msecs_to_jiffies(UCSI_WAIT_TIME_MS));
+		if (!rc && test_bit(CMD_BUSY, &udev->flags)) {
+			/*
+			 * The PPM reported BUSY and never completed the command.
+			 * Return success so that ucsi_exec_command() reads CCI,
+			 * sees BUSY and sends UCSI_CANCEL; failing here would
+			 * leave the PPM stuck with the command pending.
+			 */
+			pr_warn("command still busy, letting the core cancel it\n");
+			rc = 1;
+		}
 		if (!rc) {
 			pr_err("timed out for sync_write_ack\n");
 			rc = -ETIMEDOUT;
@@ -386,8 +400,10 @@ static int ucsi_qti_glink_write(struct ucsi_dev *udev, unsigned int offset,
 	}
 
 out:
-	if (sync)
+	if (sync) {
 		clear_bit(CMD_PENDING, &udev->flags);
+		clear_bit(CMD_BUSY, &udev->flags);
+	}
 
 	mutex_unlock(&udev->write_lock);
 	return rc;
