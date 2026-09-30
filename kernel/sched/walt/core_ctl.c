@@ -1854,7 +1854,12 @@ static int cluster_init(const struct cpumask *mask)
 	cluster->offline_delay_ms = 100;
 	cluster->task_thres = UINT_MAX;
 	cluster->nrrun = cluster->num_cpus;
-	cluster->enable = false;
+	/*
+	 * Enabled by default as in msm-5.10: the waipio/cape vendor post_boot
+	 * script only disables core_ctl on the silver cluster and relies on
+	 * the gold and prime clusters being enabled.
+	 */
+	cluster->enable = true;
 	cluster->nr_not_preferred_cpus = 0;
 	cluster->strict_nrrun = 0;
 	cluster->nr_big = 0;
