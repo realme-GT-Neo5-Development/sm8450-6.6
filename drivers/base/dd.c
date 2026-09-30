@@ -63,18 +63,6 @@ static char async_probe_drv_names[ASYNC_DRV_NAMES_MAX_LEN];
 static bool async_probe_default;
 
 /*
- * driver_async_probe=off: force synchronous probing for every driver,
- * including those hard-coded to PROBE_PREFER_ASYNCHRONOUS. Upstream only
- * offers the opposite ("*" makes everything async).
- *
- * The 6.6 tree marks ~300 drivers async (vs ~100 in msm-5.10), and several
- * vendor drivers on waipio/cape rely on the probe order that synchronous
- * probing used to guarantee instead of declaring device links. Probing them
- * synchronously restores that order at no measurable boot-time cost.
- */
-static bool async_probe_disabled;
-
-/*
  * In some cases, like suspend to RAM or hibernation, It might be reasonable
  * to prohibit probing of devices as it could be unsafe.
  * Once defer_all_probes is true all drivers probes will be forcibly deferred.
@@ -896,22 +884,12 @@ static int __init save_async_options(char *buf)
 	strscpy(async_probe_drv_names, buf, ASYNC_DRV_NAMES_MAX_LEN);
 	async_probe_default = parse_option_str(async_probe_drv_names, "*");
 
-	async_probe_disabled = parse_option_str(async_probe_drv_names, "off");
-	if (async_probe_disabled) {
-		async_probe_default = false;
-		pr_info("driver_async_probe=off: asynchronous probing disabled\n");
-	}
-
 	return 1;
 }
 __setup("driver_async_probe=", save_async_options);
 
 static bool driver_allows_async_probing(struct device_driver *drv)
 {
-	/* Must precede the switch, PROBE_PREFER_ASYNCHRONOUS would win otherwise. */
-	if (async_probe_disabled)
-		return false;
-
 	switch (drv->probe_type) {
 	case PROBE_PREFER_ASYNCHRONOUS:
 		return true;
