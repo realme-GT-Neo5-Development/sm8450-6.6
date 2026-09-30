@@ -656,6 +656,157 @@ static int haptics_add_debugfs(struct dentry *hap_dir, struct haptics_effect *ef
 	return rc;
 }
 
+static int dump_enable_dbgfs_read(void *data, u64 *val)
+{
+	*val = richtap_dump_active;
+	return 0;
+}
+
+static int dump_enable_dbgfs_write(void *data, u64 val)
+{
+	mutex_lock(&richtap_dump_mutex);
+	richtap_dump_active = !!val;
+	richtap_dump_len = 0;
+	richtap_dump_source = 0;
+	mutex_unlock(&richtap_dump_mutex);
+	return 0;
+}
+DEFINE_DEBUGFS_ATTRIBUTE(dump_enable_dbgfs_ops, dump_enable_dbgfs_read,
+		dump_enable_dbgfs_write, "%llu\n");
+
+static ssize_t dump_data_dbgfs_read(struct file *fp, char __user *buf,
+		size_t count, loff_t *ppos)
+{
+	ssize_t ret;
+	size_t total;
+	uint8_t act_header[32];
+	u32 data_len;
+	size_t to_copy;
+
+	mutex_lock(&richtap_dump_mutex);
+	if (richtap_dump_len == 0 || !richtap_dump_buf) {
+		mutex_unlock(&richtap_dump_mutex);
+		return 0;
+	}
+
+	data_len = (u32)richtap_dump_len;
+	total = 32 + richtap_dump_len;
+
+	if (*ppos >= total) {
+		mutex_unlock(&richtap_dump_mutex);
+		return 0;
+	}
+
+	if (*ppos + count > total)
+		count = total - *ppos;
+
+	/* Build ACT header on the fly */
+	memset(act_header, 0, sizeof(act_header));
+	act_header[0] = 'a';
+	act_header[1] = 'c';
+	act_header[2] = 't';
+	act_header[3] = '\0';
+	/* config_version = 0 at offset 4 (already zero) */
+	/* data_length at offset 8, uint32 LE */
+	act_header[8] = data_len & 0xff;
+	act_header[9] = (data_len >> 8) & 0xff;
+	act_header[10] = (data_len >> 16) & 0xff;
+	act_header[11] = (data_len >> 24) & 0xff;
+	/* reserved[12..31] already zero */
+
+	/* Phase 1: copy header bytes if read starts within header */
+	if (*ppos < 32) {
+		to_copy = min(count, (size_t)(32 - *ppos));
+		if (copy_to_user(buf, act_header + *ppos, to_copy)) {
+			mutex_unlock(&richtap_dump_mutex);
+			return -EFAULT;
+		}
+		*ppos += to_copy;
+		buf += to_copy;
+		count -= to_copy;
+		ret = to_copy;
+	} else {
+		ret = 0;
+	}
+
+	/* Phase 2: copy waveform data */
+	if (count > 0) {
+		size_t data_off = *ppos - 32;
+		size_t avail = richtap_dump_len - data_off;
+
+		to_copy = min(count, avail);
+		if (copy_to_user(buf, richtap_dump_buf + data_off, to_copy)) {
+			mutex_unlock(&richtap_dump_mutex);
+			return ret ? ret : -EFAULT;
+		}
+		*ppos += to_copy;
+		ret += to_copy;
+	}
+
+	mutex_unlock(&richtap_dump_mutex);
+	return ret;
+}
+
+static const struct file_operations dump_data_dbgfs_ops = {
+	.read = dump_data_dbgfs_read,
+	.open = simple_open,
+	.owner = THIS_MODULE,
+};
+
+static ssize_t dump_info_dbgfs_read(struct file *fp, char __user *buf,
+		size_t count, loff_t *ppos)
+{
+	char info[64];
+	size_t len;
+	ssize_t ret;
+
+	mutex_lock(&richtap_dump_mutex);
+	len = scnprintf(info, sizeof(info), "source=%s len=%zu\n",
+			richtap_dump_source == 0 ? "rtp" : "stream",
+			richtap_dump_len);
+	mutex_unlock(&richtap_dump_mutex);
+	ret = simple_read_from_buffer(buf, count, ppos, info, len);
+	return ret;
+}
+
+static const struct file_operations dump_info_dbgfs_ops = {
+	.read = dump_info_dbgfs_read,
+	.open = simple_open,
+	.owner = THIS_MODULE,
+};
+
+static ssize_t vmax_scale_pct_dbgfs_read(struct file *file, char __user *buf,
+		size_t count, loff_t *ppos)
+{
+	char tmp_buf[16];
+	int len;
+
+	len = snprintf(tmp_buf, sizeof(tmp_buf), "%u\n", vmax_scale_pct);
+	return simple_read_from_buffer(buf, count, ppos, tmp_buf, len);
+}
+
+static ssize_t vmax_scale_pct_dbgfs_write(struct file *file, const char __user *buf,
+		size_t count, loff_t *ppos)
+{
+	u32 val;
+	int ret;
+
+	ret = kstrtou32_from_user(buf, count, 10, &val);
+	if (ret)
+		return ret;
+
+	if (val > 100)
+		val = 100;
+
+	vmax_scale_pct = val;
+	return count;
+}
+
+static const struct file_operations vmax_scale_pct_dbgfs_ops = {
+	.read = vmax_scale_pct_dbgfs_read,
+	.write = vmax_scale_pct_dbgfs_write,
+};
+
 void haptics_remove_debugfs(struct haptics_chip *chip)
 {
 	debugfs_remove_recursive(chip->debugfs_dir);
@@ -695,6 +846,24 @@ int haptics_create_debugfs(struct haptics_chip *chip)
 
 	debugfs_create_u32("fifo_empty_thresh", 0600, hap_dir,
 			&chip->config.fifo_empty_thresh);
+
+	debugfs_create_file_unsafe("vmax_scale_pct", 0644, hap_dir,
+			NULL, &vmax_scale_pct_dbgfs_ops);
+
+	{
+		struct dentry *dump_dir;
+
+		dump_dir = debugfs_create_dir("dump", hap_dir);
+		if (!IS_ERR(dump_dir)) {
+			debugfs_create_file_unsafe("enable", 0644, dump_dir,
+					NULL, &dump_enable_dbgfs_ops);
+			debugfs_create_file("data", 0444, dump_dir,
+					NULL, &dump_data_dbgfs_ops);
+			debugfs_create_file("info", 0444, dump_dir,
+					NULL, &dump_info_dbgfs_ops);
+		}
+	}
+
 	chip->debugfs_dir = hap_dir;
 	return 0;
 
