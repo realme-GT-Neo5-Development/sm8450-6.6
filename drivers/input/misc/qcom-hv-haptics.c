@@ -834,10 +834,6 @@ struct haptics_calibration_data {
 #endif
 
 #ifdef RICHTAP_FOR_PMIC_ENABLE
-/* FORWARDPORT: ref-lineage qcom-hv-haptics.c:554-600 */
-static int global_strenght = 69;
-static bool richtap_stream_perform;
-
 enum {
 	RICHTAP_UNKNOWN = -1,
 	RICHTAP_AW_8697 = 0x05,
@@ -852,7 +848,7 @@ enum {
 
 #define RICHTAP_IOCTL_GROUP	0x52
 #define RICHTAP_GET_HWINFO	_IO(RICHTAP_IOCTL_GROUP, 0x03)
-#define RICHTAP_SET_STRENGHT	_IO(RICHTAP_IOCTL_GROUP, 0x04)
+#define RICHTAP_SET_FREQ	_IO(RICHTAP_IOCTL_GROUP, 0x04)
 #define RICHTAP_SETTING_GAIN	_IO(RICHTAP_IOCTL_GROUP, 0x05)
 #define RICHTAP_OFF_MODE	_IO(RICHTAP_IOCTL_GROUP, 0x06)
 #define RICHTAP_TIMEOUT_MODE	_IO(RICHTAP_IOCTL_GROUP, 0x07)
@@ -6604,7 +6600,6 @@ static long richtap_file_unlocked_ioctl(struct file *file, unsigned int cmd, uns
 			return -EFAULT;
 		break;
 	case RICHTAP_RTP_MODE:
-		richtap_stream_perform = false;	
 		if (copy_from_user(chip->rtp_ptr, (void __user *)arg,
 			RICHTAP_MMAP_BUF_SIZE * chip->richtap_mmap_buf_sum)) {
 			ret = -EFAULT;
@@ -6616,20 +6611,10 @@ static long richtap_file_unlocked_ioctl(struct file *file, unsigned int cmd, uns
 			ret = -EINVAL;
 			break;
 		}
-		
-		/* Try to fix first unresponsible chip */
-		if (chip->livetap_support) {
-			chip->cancel_work = true;
-			cancel_work_sync(&chip->richtap_stream_work);
-			cancel_work_sync(&chip->richtap_erase_work);
-			chip->cancel_work = false;
-		}
-		richtap_clean_buf(chip, MMAP_BUF_DATA_INVALID);
 		mutex_lock(&play->lock);
 		haptics_stop_fifo_play(chip);
 		mutex_unlock(&play->lock);
-		richtap_rc_clk_disable(chip, true);
-		
+
 		ret = richtap_load_prebake(chip, &chip->rtp_ptr[4], tmp);
 		if (ret < 0) {
 			dev_err(chip->dev, "aac RichTap Upload FIFO data fail, ret=%d\n", ret);
@@ -6663,17 +6648,10 @@ static long richtap_file_unlocked_ioctl(struct file *file, unsigned int cmd, uns
 		if (arg > 0x80)
 			arg = 0x80;
 		chip->play.vmax_mv = chip->config.fifo_vmax_mv * arg/ 128;
-		//if (atomic_read(&chip->richtap_mode) && richtap_stream_perform)
 		if (atomic_read(&chip->richtap_mode))
 			haptics_set_vmax_mv(chip, chip->play.vmax_mv);
 		break;
-	case RICHTAP_SET_STRENGHT:
-		if (arg > 0x80)
-			arg = 0x80;
-		global_strenght = (chip->config.fifo_vmax_mv * arg/ 128);
-		break;
 	case RICHTAP_STREAM_MODE:
-		richtap_stream_perform = true;
 		if (chip->livetap_support) {
 			chip->cancel_work = true;
 			cancel_work_sync(&chip->richtap_stream_work);
