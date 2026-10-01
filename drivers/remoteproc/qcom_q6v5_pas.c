@@ -1069,26 +1069,6 @@ static int adsp_stop(struct rproc *rproc)
 	if (ret == -ETIMEDOUT)
 		dev_err(adsp->dev, "timed out on wait\n");
 
-	/*
-	 * WORKAROUND (senna/cape, 6.6): TZ PAS_SHUTDOWN of the modem (pas_id 4)
-	 * never returns and freezes the whole SoC until the watchdog resets it,
-	 * so "power off" and "restart" from Android end in a reset. Measured with
-	 * kprobes: request_stop returns 0, qcom_scm_pas_shutdown(4) is entered and
-	 * nothing after it. Holding crypto_ddr bandwidth or the cx/mx rails does
-	 * not help; 5.10 on the same TZ does not hang. Root cause unknown (TODO).
-	 *
-	 * When the system is going down the modem has already been stopped by
-	 * sysmon (EFS flushed), and the PMIC reset/power-off that follows resets
-	 * the MSS anyway, so skip the TZ call. The flag is set by the vendor
-	 * init (init.target.rc) on sys.shutdown.requested, which the framework
-	 * sets at the start of every shutdown/reboot, low-battery included.
-	 */
-	if (qcom_device_shutdown_in_progress && adsp->pas_id == 4) {
-		dev_warn(adsp->dev, "system shutdown: skipping TZ PAS shutdown\n");
-		ret = 0;
-		goto skip_pas_shutdown;
-	}
-
 	qcom_q6v5_pas_set_bw(&adsp->q6v5, UINT_MAX, UINT_MAX);
 	ret = qcom_scm_pas_shutdown(adsp->pas_id);
 	if (ret && adsp->decrypt_shutdown)
@@ -1104,7 +1084,6 @@ static int adsp_stop(struct rproc *rproc)
 	}
 
 	qcom_q6v5_pas_set_bw(&adsp->q6v5, 0, 0);
-skip_pas_shutdown:
 	handover = qcom_q6v5_unprepare(&adsp->q6v5);
 	if (handover)
 		qcom_pas_handover(&adsp->q6v5);
