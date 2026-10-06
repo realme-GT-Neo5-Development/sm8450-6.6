@@ -36,8 +36,11 @@ ifneq ($(CONFIG_UNUSED_KSYMS_WHITELIST),)
 ALL_KMI_SYMBOLS := $(CONFIG_UNUSED_KSYMS_WHITELIST)
 else
 ALL_KMI_SYMBOLS := include/config/abi_gki_kmi_symbols
-$(ALL_KMI_SYMBOLS):
-	: > $@
+# Builds without Kleaf (plain make) do not set CONFIG_UNUSED_KSYMS_WHITELIST.
+# Fall back to the union of the arm64 symbol lists, as before, so that
+# unsigned vendor modules can still import KMI symbols.
+$(ALL_KMI_SYMBOLS): $(if $(filter arm64,$(ARCH)),$(wildcard $(srctree)/android/abi_gki_aarch64_*),)
+	$(if $(strip $^),cat $^ > $@, : > $@)
 endif
 
 include/generated/gki_module_unprotected.h: $(ALL_KMI_SYMBOLS) \
