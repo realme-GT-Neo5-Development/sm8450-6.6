@@ -184,11 +184,6 @@ static int qcom_cpucp_ipc_setup_mbox(struct qcom_cpucp_ipc *cpucp_ipc)
 {
 	struct mbox_controller *mbox;
 	struct device *dev = cpucp_ipc->dev;
-	unsigned long i;
-
-	/* Initialize channel identifiers */
-	for (i = 0; i < cpucp_ipc->desc->num_chans; i++)
-		cpucp_ipc->chans[i].con_priv = ERR_PTR(-EINVAL);
 
 	mbox = &cpucp_ipc->mbox;
 	mbox->dev = dev;
@@ -208,6 +203,7 @@ static int qcom_cpucp_probe(struct platform_device *pdev)
 	struct qcom_cpucp_ipc *cpucp_ipc;
 	struct resource *res;
 	unsigned long flags = IRQF_TRIGGER_HIGH | IRQF_NO_SUSPEND;
+	unsigned long i;
 	int ret;
 
 	desc = device_get_match_data(&pdev->dev);
@@ -252,6 +248,16 @@ static int qcom_cpucp_probe(struct platform_device *pdev)
 	if (!cpucp_ipc->chans)
 		return -ENOMEM;
 
+	/*
+	 * Mark all channels unused before the IRQ is requested: the handler
+	 * only skips channels whose con_priv is an error pointer, and CPUCP
+	 * may already have an interrupt pending.
+	 */
+	for (i = 0; i < desc->num_chans; i++) {
+		spin_lock_init(&cpucp_ipc->chans[i].lock);
+		cpucp_ipc->chans[i].con_priv = ERR_PTR(-EINVAL);
+	}
+
 	if (desc->v2_mbox) {
 		writeq(0, cpucp_ipc->rx_irq_base + desc->enable_reg);
 		writeq(0, cpucp_ipc->rx_irq_base + desc->clear_reg);
@@ -280,7 +286,10 @@ static int qcom_cpucp_probe(struct platform_device *pdev)
 	if (desc->v2_mbox)
 		writeq(APSS_CPUCP_RX_MBOX_CMD_MASK, cpucp_ipc->rx_irq_base + desc->map_reg);
 
+	/* mbox_controller_register() reinitializes the channel locks */
+	disable_irq(cpucp_ipc->irq);
 	ret = qcom_cpucp_ipc_setup_mbox(cpucp_ipc);
+	enable_irq(cpucp_ipc->irq);
 	if (ret)
 		return dev_err_probe(&pdev->dev, ret, "Failed to create mailbox\n");
 
